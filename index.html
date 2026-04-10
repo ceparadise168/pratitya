@@ -69,16 +69,6 @@ function entropy() {
   return (Math.random() + s) % 1;
 }
 
-function randomizeFieldTarget() {
-  fieldTarget.energy = entropy();
-  fieldTarget.warmth = entropy();
-  fieldTarget.rotation = (entropy() - 0.5) * 2;
-  fieldTarget.flowX = (entropy() - 0.5) * 2;
-  fieldTarget.flowY = (entropy() - 0.5) * 2;
-  fieldTarget.cohesion = entropy();
-  fieldTarget.pulse = entropy();
-}
-
 // === ASPECT 佛相 ===
 const ASPECTS = {
   wrath: {
@@ -320,6 +310,10 @@ function updateAgents(t, dt) {
     fx += Math.sin(a.phase) * 0.2;
     fy += Math.cos(a.phase * 1.3) * 0.2;
 
+    // Thangka forces
+    applyAureoleForceToAgent(a);
+    applyMandalaForceToAgent(a, i);
+
     // Apply forces
     a.vx = a.vx * 0.95 + fx * 0.05;
     a.vy = a.vy * 0.95 + fy * 0.05;
@@ -362,6 +356,172 @@ function fadeTrace() {
   traceCtx.fillStyle = 'rgba(0, 0, 0, 0.008)';
   traceCtx.fillRect(0, 0, W, H);
   traceCtx.globalCompositeOperation = 'source-over';
+}
+
+// === THANGKA 唐卡 ===
+
+// --- Aureole 背光 ---
+let aureoleActive = false;
+let aureoleTimer = 0;
+let aureoleCx = 0, aureoleCy = 0;
+const AUREOLE_DURATION = 4000;
+const AUREOLE_ENERGY_THRESHOLD = 0.85;
+let aureoleCooldown = 0;
+
+function checkAureole(dt) {
+  aureoleCooldown -= dt;
+  if (!aureoleActive && field.energy > AUREOLE_ENERGY_THRESHOLD && aureoleCooldown <= 0) {
+    aureoleActive = true;
+    aureoleTimer = 0;
+    let sumX = 0, sumY = 0;
+    for (const a of agents) { sumX += a.x; sumY += a.y; }
+    aureoleCx = sumX / agents.length;
+    aureoleCy = sumY / agents.length;
+    aureoleCooldown = 20000 + entropy() * 30000;
+  }
+  if (aureoleActive) {
+    aureoleTimer += dt;
+    if (aureoleTimer > AUREOLE_DURATION) aureoleActive = false;
+  }
+}
+
+function applyAureoleForceToAgent(a) {
+  if (!aureoleActive) return;
+  const progress = aureoleTimer / AUREOLE_DURATION;
+  if (progress > 0.5) return;
+  const strength = easeInOut(progress * 2) * 0.15;
+  const dx = a.x - aureoleCx, dy = a.y - aureoleCy;
+  const dist = Math.sqrt(dx * dx + dy * dy) + 1;
+  const angle = Math.atan2(dy, dx);
+  const targetDist = 50 + (Math.abs(Math.sin(angle * 6)) * 150);
+  const forceMag = (targetDist - dist) * strength * 0.01;
+  a.vx += Math.cos(angle) * forceMag;
+  a.vy += Math.sin(angle) * forceMag;
+}
+
+function drawAureoleGlow() {
+  if (!aureoleActive) return;
+  const progress = aureoleTimer / AUREOLE_DURATION;
+  const alpha = Math.sin(progress * Math.PI) * 0.08 * breathAlpha;
+  if (alpha < 0.001) return;
+  const hue = fieldToHue();
+  const grad = ctx.createRadialGradient(aureoleCx, aureoleCy, 0, aureoleCx, aureoleCy, 200);
+  grad.addColorStop(0, `hsla(${hue}, 40%, 60%, ${alpha})`);
+  grad.addColorStop(1, `hsla(${hue}, 40%, 60%, 0)`);
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.arc(aureoleCx, aureoleCy, 200, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+// --- Mandala 曼陀羅 ---
+let mandalaActive = false;
+let mandalaTimer = 0;
+const MANDALA_DURATION = 6000;
+let mandalaCooldown = 0;
+
+function checkMandala(dt) {
+  mandalaCooldown -= dt;
+  if (!mandalaActive && currentAspect === 'meditation' && field.cohesion > 0.8 && field.energy < 0.2 && mandalaCooldown <= 0) {
+    mandalaActive = true;
+    mandalaTimer = 0;
+    mandalaCooldown = 30000 + entropy() * 60000;
+  }
+  if (mandalaActive) {
+    mandalaTimer += dt;
+    if (mandalaTimer > MANDALA_DURATION || currentAspect !== 'meditation') mandalaActive = false;
+  }
+}
+
+function applyMandalaForceToAgent(a, agentIndex) {
+  if (!mandalaActive) return;
+  const progress = mandalaTimer / MANDALA_DURATION;
+  let strength;
+  if (progress < 0.4) strength = easeInOut(progress / 0.4) * 0.2;
+  else if (progress < 0.7) strength = 0.2;
+  else strength = 0.2 * (1 - easeInOut((progress - 0.7) / 0.3));
+  const cx = W / 2, cy = H / 2;
+  const foldSymmetry = 8;
+  const dx = a.x - cx, dy = a.y - cy;
+  const angle = Math.atan2(dy, dx);
+  const sectorAngle = (Math.PI * 2) / foldSymmetry;
+  const snappedAngle = Math.round(angle / sectorAngle) * sectorAngle;
+  const ringIndex = Math.floor(agentIndex / (agents.length / 5));
+  const targetDist = 40 + ringIndex * 50;
+  const targetX = cx + Math.cos(snappedAngle) * targetDist;
+  const targetY = cy + Math.sin(snappedAngle) * targetDist;
+  a.vx += (targetX - a.x) * strength * 0.01;
+  a.vy += (targetY - a.y) * strength * 0.01;
+}
+
+// --- Flame Motif 火焰紋 ---
+function drawFlameTrails() {
+  if (currentAspect !== 'wrath' || field.energy < 0.7) return;
+  const intensity = (field.energy - 0.7) / 0.3;
+  const hue = fieldToHue();
+  for (let i = 0; i < agents.length; i += 2) {
+    const a = agents[i];
+    const v = Math.sqrt(a.vx * a.vx + a.vy * a.vy);
+    if (v < 1.5) continue;
+    const len = v * 6 * intensity;
+    const baseAngle = Math.atan2(a.vy, a.vx) + Math.PI;
+    ctx.save();
+    ctx.translate(a.x, a.y);
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    for (let s = 1; s <= 6; s++) {
+      const t = s / 6;
+      const curl = Math.sin(t * Math.PI * 2 + performance.now() * 0.005 + a.phase) * 15 * t;
+      const upBias = -t * 20 * intensity;
+      ctx.lineTo(Math.cos(baseAngle) * len * t + curl, Math.sin(baseAngle) * len * t + upBias);
+    }
+    ctx.strokeStyle = `hsla(${hue + 10}, ${50 + intensity * 30}%, ${50 + intensity * 15}%, ${intensity * breathAlpha * 0.4})`;
+    ctx.lineWidth = 1.5 + intensity;
+    ctx.lineCap = 'round';
+    ctx.stroke();
+    if (v > 2.5) {
+      ctx.beginPath();
+      const forkAngle = baseAngle + (Math.sin(a.phase * 7.3) > 0 ? 0.5 : -0.5);
+      const fx = Math.cos(baseAngle) * len * 0.4;
+      const fy = Math.sin(baseAngle) * len * 0.4;
+      ctx.moveTo(fx, fy);
+      for (let s = 1; s <= 3; s++) {
+        const t = s / 3;
+        ctx.lineTo(fx + Math.cos(forkAngle) * len * 0.4 * t, fy + Math.sin(forkAngle) * len * 0.4 * t - t * 12);
+      }
+      ctx.strokeStyle = `hsla(${hue + 20}, ${40 + intensity * 20}%, ${55 + intensity * 10}%, ${intensity * breathAlpha * 0.25})`;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+}
+
+// --- Gold Event 金 ---
+let goldActive = false;
+let goldTimer = 0;
+const GOLD_DURATION = 3000;
+let goldCooldown = 60000;
+
+function checkGold(dt) {
+  goldCooldown -= dt;
+  if (!goldActive && goldCooldown <= 0) {
+    const alignment = (1 - Math.abs(field.energy - 0.6)) * field.warmth * field.cohesion * (1 - Math.abs(field.rotation));
+    if (alignment > 0.3 && entropy() < 0.00003) {
+      goldActive = true;
+      goldTimer = 0;
+      goldCooldown = 180000 + entropy() * 180000;
+    }
+  }
+  if (goldActive) {
+    goldTimer += dt;
+    if (goldTimer > GOLD_DURATION) goldActive = false;
+  }
+}
+
+function goldAlpha() {
+  if (!goldActive) return 0;
+  return Math.sin((goldTimer / GOLD_DURATION) * Math.PI);
 }
 
 // === BUDDHA-NATURE 佛性 ===
@@ -430,6 +590,9 @@ function loop(t) {
 
   updateMacro(dt);
   lerpField(dt);
+  checkAureole(dt);
+  checkMandala(dt);
+  checkGold(dt);
   updateBreath(dt);
 
   // True emptiness: absolute void during rare silence
@@ -456,9 +619,19 @@ function loop(t) {
       const a = agents[i];
       const r = a.size * (0.8 + field.energy * 0.6);
 
+      const gAlpha = goldAlpha();
+      let drawHue = hue + a.phase * 3;
+      let drawSat = sat;
+      let drawLight = light;
+      if (gAlpha > 0) {
+        drawHue = drawHue + (45 - drawHue) * gAlpha;
+        drawSat = drawSat + (70 - drawSat) * gAlpha;
+        drawLight = drawLight + (60 - drawLight) * gAlpha;
+      }
+
       ctx.beginPath();
       ctx.arc(a.x, a.y, r, 0, Math.PI * 2);
-      ctx.fillStyle = `hsla(${hue + a.phase * 3}, ${sat}%, ${light}%, ${(0.4 + field.energy * 0.4) * breathAlpha})`;
+      ctx.fillStyle = `hsla(${drawHue}, ${drawSat}%, ${drawLight}%, ${(0.4 + field.energy * 0.4) * breathAlpha})`;
       ctx.fill();
 
       // Motion trail
@@ -493,14 +666,9 @@ function loop(t) {
         }
       }
     }
-  }
 
-  // Temporary debug
-  ctx.fillStyle = 'rgba(255,255,255,0.15)';
-  ctx.font = '11px monospace';
-  const keys = Object.keys(field);
-  for (let i = 0; i < keys.length; i++) {
-    ctx.fillText(`${keys[i]}: ${field[keys[i]].toFixed(3)}`, 10, 20 + i * 14);
+    drawFlameTrails();
+    drawAureoleGlow();
   }
 
   updateBuddhaNature(dt);
@@ -510,6 +678,12 @@ function loop(t) {
 }
 
 requestAnimationFrame(loop);
+
+document.addEventListener('click', () => {
+  if (!document.fullscreenElement) {
+    document.documentElement.requestFullscreen().catch(() => {});
+  }
+});
 </script>
 </body>
 </html>
