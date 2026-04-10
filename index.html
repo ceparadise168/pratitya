@@ -44,9 +44,10 @@ function resize() {
     c.width = cw;
     c.height = ch;
   }
-  traceCtx.scale(dpr, dpr);
-  coreCtx.scale(dpr, dpr);
-  ctx.scale(dpr, dpr);
+  // P0-5: reset transform before scaling to prevent accumulation across resizes
+  traceCtx.setTransform(1,0,0,1,0,0); traceCtx.scale(dpr, dpr);
+  coreCtx.setTransform(1,0,0,1,0,0);  coreCtx.scale(dpr, dpr);
+  ctx.setTransform(1,0,0,1,0,0);      ctx.scale(dpr, dpr);
 
   CX = W / 2;
   CY = H / 2;
@@ -65,10 +66,10 @@ function entropy() {
 
 // === PALETTE ===
 const PALETTE = {
-  deepBlue:  { h: 220, s: 75, l: 25 },
+  deepBlue:  { h: 220, s: 75, l: 35 },
   vermilion: { h: 5,   s: 80, l: 45 },
   emerald:   { h: 155, s: 65, l: 30 },
-  gold:      { h: 45,  s: 85, l: 55 },
+  gold:      { h: 42,  s: 80, l: 48 },
   purple:    { h: 280, s: 60, l: 25 },
   warmWhite: { h: 40,  s: 30, l: 85 },
 };
@@ -88,7 +89,11 @@ function hsl(color, alpha) {
 // [Fix #9] Color pair selection: collect all pairs containing primary,
 // choose based on field state (gold+vermilion when energy>0.8 && warmth>0.7)
 function fieldPrimaryColor() {
-  if (field.energy > 0.6) return derived.warmth > 0.6 ? 'vermilion' : 'gold';
+  // P0-1: warm colors locked until colorMaturity > 0.6
+  if (field.energy > 0.6) {
+    if (derived.warmth > 0.6 && isWarmColorUnlocked()) return 'vermilion';
+    return 'gold';
+  }
   if (field.order > 0.6) return 'gold';
   if (field.energy < 0.3) return field.order > 0.5 ? 'deepBlue' : 'purple';
   return 'deepBlue';
@@ -112,10 +117,13 @@ function fieldSecondaryColor() {
 }
 
 // [Fix #10] colorMaturity growth rate: dt * 0.000012 (~83s to reach 1)
-let colorMaturity = 0;
+// P0-1: colorMaturity starts at 0.3 (visible from the start), controls color selection not alpha
+let colorMaturity = 0.3;
 function updateColorMaturity(dt) {
   if (colorMaturity < 1) colorMaturity = Math.min(1, colorMaturity + dt * 0.000012);
 }
+// Before maturity reaches ~0.6 (~25s), only cool colors + gold. After that, warm colors unlock.
+function isWarmColorUnlocked() { return colorMaturity > 0.6; }
 
 // === FIELD ===
 const field = { energy: 0.3, order: 0.5 };
@@ -141,7 +149,8 @@ function lerpField(dt) {
   const de = fieldTarget.energy - field.energy;
   const dor = fieldTarget.order - field.order;
   const dist = Math.sqrt(de * de + dor * dor);
-  const rate = (0.0003 + dist * dist * 0.02) * dt;
+  // P1-12: slower field transitions — large jumps take 1-2s not 0.2s
+  const rate = (0.0003 + dist * dist * 0.005) * dt;
   field.energy += de * rate;
   field.order += dor * rate;
 }
@@ -198,36 +207,33 @@ function updateMacro(dt) {
 function strokeThangka(pathPoints, baseWidth, color, alpha, embedColor) {
   if (pathPoints.length < 2 || alpha < 0.005) return;
 
-  // Principle 2: Embedded edge — draw wider, dimmer base layer first
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  // Principle 2: Embedded edge — wider, dimmer base layer (P1-11: +0.5 not +1)
   if (embedColor) {
-    ctx.lineWidth = baseWidth + 1;
+    ctx.lineWidth = baseWidth + 0.5;
     ctx.strokeStyle = embedColor;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
     ctx.beginPath();
     ctx.moveTo(pathPoints[0].x, pathPoints[0].y);
-    for (let i = 1; i < pathPoints.length; i++) {
-      ctx.lineTo(pathPoints[i].x, pathPoints[i].y);
-    }
+    for (let i = 1; i < pathPoints.length; i++) ctx.lineTo(pathPoints[i].x, pathPoints[i].y);
     ctx.stroke();
   }
 
-  // Principle 1: Breathing micro-variation
-  // Low-frequency sine along path length, amplitude 2-3% of baseWidth
+  // Principle 1: Breathing micro-variation (P0-2: batch every 4 segments)
   const breathAmp = baseWidth * 0.025;
   const totalLen = pathPoints.length;
-  // Period: roughly 1/3 of total path length
-  const breathFreq = Math.PI * 2 / Math.max(totalLen / 3, 4);
+  const breathFreq = Math.PI * 2 / Math.max(totalLen / 2, 4); // ~2 waves per path
+  const batchSize = 4;
 
-  ctx.lineCap = 'round';
-  ctx.lineJoin = 'round';
-  for (let i = 1; i < pathPoints.length; i++) {
+  ctx.strokeStyle = color;
+  for (let i = 1; i < pathPoints.length; i += batchSize) {
     const breathOffset = Math.sin(i * breathFreq) * breathAmp;
     ctx.lineWidth = baseWidth + breathOffset;
-    ctx.strokeStyle = color;
     ctx.beginPath();
     ctx.moveTo(pathPoints[i - 1].x, pathPoints[i - 1].y);
-    ctx.lineTo(pathPoints[i].x, pathPoints[i].y);
+    const end = Math.min(i + batchSize, pathPoints.length);
+    for (let j = i; j < end; j++) ctx.lineTo(pathPoints[j].x, pathPoints[j].y);
     ctx.stroke();
   }
 }
@@ -239,9 +245,10 @@ function goldTone(angle, alpha) {
   // Horizontal → warm gold (h:45, s:85, l:50)
   // Vertical → bright gold (h:48, s:80, l:65)
   const verticalness = Math.abs(Math.sin(angle));
-  const h = 45 + verticalness * 3;
-  const s = 85 - verticalness * 5;
-  const l = 50 + verticalness * 15;
+  // P1-7: warm gold base (42,80,48), vertical shift +10% lightness not +15%
+  const h = 42 + verticalness * 4;
+  const s = 80 - verticalness * 5;
+  const l = 48 + verticalness * 10;
   return `hsla(${h}, ${s}%, ${l}%, ${alpha})`;
 }
 
@@ -459,7 +466,8 @@ function managePatterns(dt) {
 function renderPattern(p) {
   if (p.alpha < 0.01) return;
   const fadeFromCenter = Math.min(1, p.r / (R * 0.2));
-  const fadeAtEdge = Math.max(0, 1 - (p.r / R - 0.7) / 0.3);
+  // P1-9: smoothstep edge fade — no hard boundary at R*0.7
+  const fadeAtEdge = Math.pow(Math.max(0, 1 - (p.r / R - 0.6) / 0.4), 2);
 
   // [Fix #28] Directional breathing: BIRTH uses r-based delay, DYING uses r-based delay
   let dirAlpha = 1;
@@ -478,11 +486,13 @@ function renderPattern(p) {
     dirAlpha = 1 - fadeProgress;
   }
 
-  const a = p.alpha * breathAlpha * colorMaturity * fadeFromCenter * Math.min(1, fadeAtEdge) * dirAlpha;
+  // P0-4: simplified alpha — three layers max. fadeFromCenter and dirAlpha baked into p.alpha via lifecycle.
+  // colorMaturity no longer affects alpha (controls color selection instead).
+  const a = p.alpha * breathAlpha * fadeAtEdge * dirAlpha * fadeFromCenter;
   if (a < 0.005) return;
 
   const lw = distanceLineWidth(p);
-  const color = hsl(p.colorKey, a * 0.7);
+  const color = hsl(p.colorKey, a * 0.85);
   // Embedded edge: use a dimmer version of the pattern's own color
   const embedColor = hsl(p.colorKey, a * 0.15);
 
@@ -612,7 +622,8 @@ function renderBeing(b) {
     dirAlpha = 1 - fadeProgress;
   }
 
-  const a = b.alpha * breathAlpha * colorMaturity * fadeFromCenter * dirAlpha;
+  // P0-4: simplified alpha, no colorMaturity multiplier
+  const a = b.alpha * breathAlpha * fadeFromCenter * dirAlpha;
   if (a < 0.005 && !b.dying) return;
 
   // [Fix #20] Faint shadowBlur for beings
@@ -627,11 +638,12 @@ function renderBeing(b) {
     ctx.shadowBlur = 0;
     // Death animation: fragments scatter
     for (const f of b.fragments) {
-      f.r += f.vr * 0.5;
+      // P1-8: slower drift
+      f.r += f.vr * 0.3;
       f.theta += f.vt;
       // [Fix #23] Add friction
       f.vr *= 0.96;
-      f.alpha *= 0.97;
+      f.alpha *= 0.993; // P1-8: slower fade — silk unraveling
       if (f.alpha < 0.01) continue;
       const fx = CX + Math.cos(f.theta) * f.r;
       const fy = CY + Math.sin(f.theta) * f.r;
@@ -762,7 +774,8 @@ function updateBeing(b, dt) {
     b.dying = true;
     b.deathTimer = 0;
     // Create fragments
-    const numFrags = 5 + Math.floor(entropy() * 8);
+    // P1-8: fewer, longer, slower fragments — silk unraveling, not glass shattering
+    const numFrags = 3 + Math.floor(entropy() * 4);
     for (let i = 0; i < numFrags; i++) {
       b.fragments.push({
         r: b.r + (entropy() - 0.5) * 20,
@@ -771,7 +784,7 @@ function updateBeing(b, dt) {
         vr: (entropy() - 0.5) * 8,
         vt: (entropy() - 0.5) * 0.01,
         angle: entropy() * Math.PI * 2,
-        len: 3 + entropy() * 10,
+        len: 10 + entropy() * 15,
         width: 0.3 + entropy() * 0.8,
         alpha: 0.6 + entropy() * 0.4,
       });
@@ -860,7 +873,8 @@ function beginLife() {
   livingDur = (5000 + entropy() * 30000) * ls;
   // [Fix #35] livingDur floor: Math.max(8000, livingDur)
   livingDur = Math.max(8000, livingDur);
-  dyingDur = (3000 + entropy() * 5000) * ls;
+  // P1-6: spec requires 30-90s dying (退潮). Base 20-60s before scaling.
+  dyingDur = (20000 + entropy() * 40000) * ls;
   silenceDur = (500 + entropy() * 8000) * ss;
   breathState = BREATH.BIRTH;
   breathTimer = 0;
@@ -1007,7 +1021,8 @@ function drawBN() {
     bnAlpha = 1;
   }
 
-  const pulseAlpha = 0.05 + Math.sin(performance.now() * 0.0008) * 0.035;
+  // P1-10: brighter buddha-nature — range 0.03-0.13
+  const pulseAlpha = 0.08 + Math.sin(performance.now() * 0.0008) * 0.05;
   const a = pulseAlpha * bnAlpha;
   if (a < 0.005) return;
 
