@@ -181,38 +181,126 @@ function updateMacro(dt) {
   abundance += (abundanceTarget - abundance) * 0.00005 * dt;
 }
 
+// === THANGKA LINE QUALITY ===
+// Three principles from master Tenzin Norbu:
+// 1. Breathing micro-variation: 2-3% lineWidth sine wave along path
+// 2. Embedded edges: 0.5px fusion with adjacent color
+// 3. Angle-dependent gold tone
+
+// Stroke a path with breathing micro-variation in line width.
+// Instead of ctx.stroke() on a complete path, we re-draw it as short segments
+// with gently oscillating lineWidth. Call AFTER ctx.beginPath() + moveTo/lineTo/etc.
+// pathPoints: array of {x, y} — the discretized path
+// baseWidth: nominal lineWidth
+// color: hsla string
+// alpha: overall alpha
+// embedColor: optional adjacent color for embedded edge (null = skip)
+function strokeThangka(pathPoints, baseWidth, color, alpha, embedColor) {
+  if (pathPoints.length < 2 || alpha < 0.005) return;
+
+  // Principle 2: Embedded edge — draw wider, dimmer base layer first
+  if (embedColor) {
+    ctx.lineWidth = baseWidth + 1;
+    ctx.strokeStyle = embedColor;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    ctx.moveTo(pathPoints[0].x, pathPoints[0].y);
+    for (let i = 1; i < pathPoints.length; i++) {
+      ctx.lineTo(pathPoints[i].x, pathPoints[i].y);
+    }
+    ctx.stroke();
+  }
+
+  // Principle 1: Breathing micro-variation
+  // Low-frequency sine along path length, amplitude 2-3% of baseWidth
+  const breathAmp = baseWidth * 0.025;
+  const totalLen = pathPoints.length;
+  // Period: roughly 1/3 of total path length
+  const breathFreq = Math.PI * 2 / Math.max(totalLen / 3, 4);
+
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  for (let i = 1; i < pathPoints.length; i++) {
+    const breathOffset = Math.sin(i * breathFreq) * breathAmp;
+    ctx.lineWidth = baseWidth + breathOffset;
+    ctx.strokeStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(pathPoints[i - 1].x, pathPoints[i - 1].y);
+    ctx.lineTo(pathPoints[i].x, pathPoints[i].y);
+    ctx.stroke();
+  }
+}
+
+// Principle 3: Gold with angle-dependent tone
+// Returns an hsla string for gold that shifts warm↔bright based on line direction angle
+function goldTone(angle, alpha) {
+  // angle: direction of the line segment in radians
+  // Horizontal → warm gold (h:45, s:85, l:50)
+  // Vertical → bright gold (h:48, s:80, l:65)
+  const verticalness = Math.abs(Math.sin(angle));
+  const h = 45 + verticalness * 3;
+  const s = 85 - verticalness * 5;
+  const l = 50 + verticalness * 15;
+  return `hsla(${h}, ${s}%, ${l}%, ${alpha})`;
+}
+
+// Collect points along a Canvas arc for strokeThangka
+function arcToPoints(cx, cy, r, startAngle, endAngle, steps) {
+  const pts = [];
+  const range = endAngle - startAngle;
+  const n = steps || Math.max(8, Math.floor(Math.abs(range) * r / 10));
+  for (let i = 0; i <= n; i++) {
+    const a = startAngle + (i / n) * range;
+    pts.push({ x: cx + Math.cos(a) * r, y: cy + Math.sin(a) * r });
+  }
+  return pts;
+}
+
 // === CORE GRID ===
 function drawCoreGrid() {
   coreCtx.save();
   coreCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
   coreCtx.clearRect(0, 0, W, H);
-  coreCtx.strokeStyle = hsl('gold', 0.1);
   coreCtx.lineWidth = 0.5;
+  coreCtx.lineCap = 'round';
 
-  // [Fix #6] Concentric circles: use cr *= 1.5 (not phi*0.6 which ~0.97 causing near-infinite loop)
+  // Concentric circles — use angle-dependent gold tone
   let cr = R * 0.05;
   while (cr < R) {
-    coreCtx.beginPath();
-    coreCtx.arc(CX, CY, cr, 0, Math.PI * 2);
-    coreCtx.stroke();
+    // Draw circle as segments with angle-dependent gold
+    const segs = 32;
+    for (let i = 0; i < segs; i++) {
+      const a1 = (i / segs) * Math.PI * 2;
+      const a2 = ((i + 1) / segs) * Math.PI * 2;
+      const midAngle = (a1 + a2) / 2;
+      coreCtx.strokeStyle = goldTone(midAngle, 0.1);
+      coreCtx.beginPath();
+      coreCtx.arc(CX, CY, cr, a1, a2);
+      coreCtx.stroke();
+    }
     cr *= 1.5;
   }
 
-  // Radial lines (16-fold)
+  // Radial lines (16-fold) — each spoke with angle-dependent gold
   const spokes = 16;
   for (let i = 0; i < spokes; i++) {
     const angle = (i / spokes) * Math.PI * 2;
+    coreCtx.strokeStyle = goldTone(angle, 0.1);
     coreCtx.beginPath();
     coreCtx.moveTo(CX, CY);
     coreCtx.lineTo(CX + Math.cos(angle) * R * 0.8, CY + Math.sin(angle) * R * 0.8);
     coreCtx.stroke();
   }
 
-  // Cross axes (slightly brighter)
-  coreCtx.strokeStyle = hsl('gold', 0.14);
+  // Cross axes (slightly brighter, angle-dependent)
   coreCtx.lineWidth = 0.7;
+  coreCtx.strokeStyle = goldTone(0, 0.14); // horizontal
   coreCtx.beginPath();
   coreCtx.moveTo(CX - R * 0.8, CY); coreCtx.lineTo(CX + R * 0.8, CY);
+  coreCtx.stroke();
+  coreCtx.strokeStyle = goldTone(Math.PI / 2, 0.14); // vertical
+  coreCtx.beginPath();
   coreCtx.moveTo(CX, CY - R * 0.8); coreCtx.lineTo(CX, CY + R * 0.8);
   coreCtx.stroke();
 
@@ -393,75 +481,70 @@ function renderPattern(p) {
   const a = p.alpha * breathAlpha * colorMaturity * fadeFromCenter * Math.min(1, fadeAtEdge) * dirAlpha;
   if (a < 0.005) return;
 
-  ctx.strokeStyle = hsl(p.colorKey, a * 0.7);
-  ctx.lineWidth = distanceLineWidth(p);
-  ctx.lineCap = 'round';
+  const lw = distanceLineWidth(p);
+  const color = hsl(p.colorKey, a * 0.7);
+  // Embedded edge: use a dimmer version of the pattern's own color
+  const embedColor = hsl(p.colorKey, a * 0.15);
 
   switch (p.type) {
     case 'arc': {
-      // [Fix #14] Arc petal shape: two arcs sharing endpoints with different radii (pointed petal)
       const startAngle = p.theta - p.arcSpan / 2;
       const endAngle = p.theta + p.arcSpan / 2;
-      // Outer arc
-      ctx.beginPath();
-      ctx.arc(CX, CY, p.r, startAngle, endAngle);
-      ctx.stroke();
-      // Inner arc with smaller radius sharing approximate endpoints — forms pointed petal
+      // Outer arc — collect points, then strokeThangka
+      const outerPts = arcToPoints(CX, CY, p.r, startAngle, endAngle);
+      strokeThangka(outerPts, lw, color, a, embedColor);
+      // Inner petal arc
       const innerR = p.r * 0.85;
-      // Compute shared endpoints
       const sx = CX + Math.cos(startAngle) * p.r;
       const sy = CY + Math.sin(startAngle) * p.r;
       const ex = CX + Math.cos(endAngle) * p.r;
       const ey = CY + Math.sin(endAngle) * p.r;
-      ctx.beginPath();
-      ctx.moveTo(sx, sy);
-      // Inner arc: use a slightly different center offset to create petal shape
       const midAngle = (startAngle + endAngle) / 2;
       const petalDepth = (p.r - innerR) * 1.5;
       const cpx = CX + Math.cos(midAngle) * (p.r - petalDepth);
       const cpy = CY + Math.sin(midAngle) * (p.r - petalDepth);
-      ctx.quadraticCurveTo(cpx, cpy, ex, ey);
-      ctx.stroke();
+      // Approximate the quadratic curve as points
+      const innerPts = [];
+      for (let i = 0; i <= 10; i++) {
+        const t = i / 10;
+        const x = (1-t)*(1-t)*sx + 2*(1-t)*t*cpx + t*t*ex;
+        const y = (1-t)*(1-t)*sy + 2*(1-t)*t*cpy + t*t*ey;
+        innerPts.push({x, y});
+      }
+      strokeThangka(innerPts, lw * 0.8, color, a, null);
       break;
     }
     case 'spiral': {
-      ctx.beginPath();
-      // [Fix #17] Steps proportional to distance from center
       const steps = Math.floor(15 + 15 * (1 - p.r / R));
+      const pts = [];
       for (let s = 0; s <= steps; s++) {
         const t = s / steps;
         const sr = p.r - t * p.r * 0.3;
         const sa = p.theta + t * p.spiralTurns * Math.PI * 0.5;
-        const sx = CX + Math.cos(sa) * sr;
-        const sy = CY + Math.sin(sa) * sr;
-        if (s === 0) {
-          ctx.moveTo(sx, sy);
-        } else {
-          // [Fix #13] Control point offset: use R * 0.01 not hardcoded 5
-          ctx.quadraticCurveTo(
-            CX + Math.cos(sa - 0.1) * (sr + R * 0.01),
-            CY + Math.sin(sa - 0.1) * (sr + R * 0.01),
-            sx, sy
-          );
-        }
+        pts.push({ x: CX + Math.cos(sa) * sr, y: CY + Math.sin(sa) * sr });
       }
-      ctx.stroke();
+      strokeThangka(pts, lw, color, a, embedColor);
       break;
     }
     case 'ray': {
-      const x = CX + Math.cos(p.theta) * p.r;
-      const y = CY + Math.sin(p.theta) * p.r;
-      ctx.beginPath();
-      ctx.moveTo(x, y);
+      const x1 = CX + Math.cos(p.theta) * p.r;
+      const y1 = CY + Math.sin(p.theta) * p.r;
       const endR = p.r + p.rayLength;
-      ctx.lineTo(CX + Math.cos(p.theta) * endR, CY + Math.sin(p.theta) * endR);
-      ctx.stroke();
+      const x2 = CX + Math.cos(p.theta) * endR;
+      const y2 = CY + Math.sin(p.theta) * endR;
+      // Discretize ray into segments for breathing
+      const rayPts = [];
+      const raySegs = 8;
+      for (let i = 0; i <= raySegs; i++) {
+        const t = i / raySegs;
+        rayPts.push({ x: x1 + (x2-x1)*t, y: y1 + (y2-y1)*t });
+      }
+      strokeThangka(rayPts, lw, color, a, embedColor);
       break;
     }
     case 'ring': {
-      ctx.beginPath();
-      ctx.arc(CX, CY, p.r, p.theta, p.theta + p.ringSpan);
-      ctx.stroke();
+      const ringPts = arcToPoints(CX, CY, p.r, p.theta, p.theta + p.ringSpan);
+      strokeThangka(ringPts, lw, color, a, embedColor);
       break;
     }
   }
@@ -562,61 +645,38 @@ function renderBeing(b) {
     return;
   }
 
-  // Living: draw with cubic bezier for higher quality [Fix #19]
+  // Living: collect path points, then use strokeThangka for breathing lines
+  const beingColor = hsl(b.colorKey, a * 0.85);
+  const beingEmbed = hsl(b.colorKey, a * 0.2);
+  const beingLw = b.lineWidth * b.sizeScale;
+
   if (b.type === 'arc') {
     const span = b.arcSpan * b.sizeScale;
-    const steps = 8;
-    ctx.beginPath();
+    const steps = 12; // more steps for beings = smoother breathing
+    const pts = [];
     for (let s = 0; s <= steps; s++) {
       const t = s / steps;
       const angle = b.theta - span / 2 + t * span;
-      // [Fix #27] Wobble amplitude capped at R * 0.005
       const maxWobble = R * 0.005;
       const rawWobble = Math.sin(t * Math.PI * 3 + b.phaseOffset + b.age * 0.001) * b.curveBias * 0.1;
       const wobble = Math.max(-maxWobble, Math.min(maxWobble, rawWobble));
       const pr = b.r + wobble;
-      const px = CX + Math.cos(angle) * pr;
-      const py = CY + Math.sin(angle) * pr;
-      if (s === 0) { ctx.moveTo(px, py); continue; }
-      // [Fix #19] MUST use bezierCurveTo not quadraticCurveTo
-      const prevAngle = b.theta - span / 2 + ((s - 1) / steps) * span;
-      const cpR = b.r + b.curveBias * 0.3;
-      const cp1x = CX + Math.cos(prevAngle + span / steps * 0.3) * cpR;
-      const cp1y = CY + Math.sin(prevAngle + span / steps * 0.3) * cpR;
-      const cp2x = CX + Math.cos(angle - span / steps * 0.3) * cpR;
-      const cp2y = CY + Math.sin(angle - span / steps * 0.3) * cpR;
-      ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, px, py);
+      pts.push({ x: CX + Math.cos(angle) * pr, y: CY + Math.sin(angle) * pr });
     }
-    ctx.stroke();
+    strokeThangka(pts, beingLw, beingColor, a, beingEmbed);
   } else {
-    // [Fix #19] Spiral branch MUST use bezierCurveTo
-    ctx.beginPath();
-    const steps = 20;
+    const steps = 24; // more steps for beings
+    const pts = [];
     for (let s = 0; s <= steps; s++) {
       const t = s / steps;
       const sr = b.r * (1 - t * 0.3) * b.sizeScale;
       const sa = b.theta + t * b.spiralTurns * Math.PI * 0.5;
-      // [Fix #27] Cap wobble amplitude
       const maxWobble = R * 0.005;
       const rawWobble = Math.sin(t * Math.PI * 2 + b.phaseOffset + b.age * 0.0008) * b.curveBias * 0.15;
       const wobble = Math.max(-maxWobble, Math.min(maxWobble, rawWobble));
-      const sx = CX + Math.cos(sa) * (sr + wobble);
-      const sy = CY + Math.sin(sa) * (sr + wobble);
-      if (s === 0) { ctx.moveTo(sx, sy); continue; }
-      const prevT = (s - 1) / steps;
-      const prevR = b.r * (1 - prevT * 0.3) * b.sizeScale;
-      const prevA = b.theta + prevT * b.spiralTurns * Math.PI * 0.5;
-      // Cubic bezier with two control points for S-curve quality
-      const midT = (prevT + t) / 2;
-      const midR = b.r * (1 - midT * 0.3) * b.sizeScale;
-      const midA = b.theta + midT * b.spiralTurns * Math.PI * 0.5;
-      const cp1x = CX + Math.cos(prevA + (midA - prevA) * 0.4) * (prevR + b.curveBias * 0.2);
-      const cp1y = CY + Math.sin(prevA + (midA - prevA) * 0.4) * (prevR + b.curveBias * 0.2);
-      const cp2x = CX + Math.cos(midA + (sa - midA) * 0.6) * (midR + b.curveBias * 0.15);
-      const cp2y = CY + Math.sin(midA + (sa - midA) * 0.6) * (midR + b.curveBias * 0.15);
-      ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, sx, sy);
+      pts.push({ x: CX + Math.cos(sa) * (sr + wobble), y: CY + Math.sin(sa) * (sr + wobble) });
     }
-    ctx.stroke();
+    strokeThangka(pts, beingLw, beingColor, a, beingEmbed);
   }
 
   // Reset shadow
