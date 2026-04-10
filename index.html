@@ -93,6 +93,74 @@ for (let i = 0; i < NUM_AGENTS; i++) {
   });
 }
 
+// === AGENT BEHAVIOR ===
+function updateAgents(t, dt) {
+  const cx = W / 2, cy = H / 2;
+  const speed = 0.3 + field.energy * 2.5;
+  const pulseWave = Math.sin(t * 0.003 * (0.5 + field.pulse * 2));
+
+  for (const a of agents) {
+    let fx = 0, fy = 0;
+
+    // Flow
+    fx += field.flowX * speed * 0.5;
+    fy += field.flowY * speed * 0.5;
+
+    // Rotation around center
+    const dx = a.x - cx, dy = a.y - cy;
+    const dist = Math.sqrt(dx * dx + dy * dy) + 1;
+    fx += (-dy / dist) * field.rotation * speed * 0.8;
+    fy += (dx / dist) * field.rotation * speed * 0.8;
+
+    // Cohesion (toward/away from center)
+    const cohesionForce = (field.cohesion - 0.5) * 2;
+    fx += (-dx / dist) * cohesionForce * speed * 0.3;
+    fy += (-dy / dist) * cohesionForce * speed * 0.3;
+
+    // Pulse (radial breathing)
+    fx += (dx / dist) * pulseWave * field.pulse * speed * 0.4;
+    fy += (dy / dist) * pulseWave * field.pulse * speed * 0.4;
+
+    // Flocking: separation + alignment (sample every 3rd for perf)
+    let sepX = 0, sepY = 0, alignX = 0, alignY = 0, nearCount = 0;
+    for (let j = 0; j < agents.length; j += 3) {
+      const b = agents[j];
+      if (b === a) continue;
+      const bx = b.x - a.x, by = b.y - a.y;
+      const bd = Math.sqrt(bx * bx + by * by);
+      if (bd < 50) {
+        nearCount++;
+        if (bd < 20) { sepX -= bx / bd; sepY -= by / bd; }
+        alignX += b.vx; alignY += b.vy;
+      }
+    }
+    if (nearCount > 0) {
+      fx += sepX * 0.3;
+      fy += sepY * 0.3;
+      fx += (alignX / nearCount - a.vx) * 0.05;
+      fy += (alignY / nearCount - a.vy) * 0.05;
+    }
+
+    // Individual wander
+    a.phase += 0.01 + field.energy * 0.02;
+    fx += Math.sin(a.phase) * 0.2;
+    fy += Math.cos(a.phase * 1.3) * 0.2;
+
+    // Apply forces
+    a.vx = a.vx * 0.95 + fx * 0.05;
+    a.vy = a.vy * 0.95 + fy * 0.05;
+    a.x += a.vx;
+    a.y += a.vy;
+
+    // Wrap edges
+    const margin = 50;
+    if (a.x < -margin) a.x += W + margin * 2;
+    if (a.x > W + margin) a.x -= W + margin * 2;
+    if (a.y < -margin) a.y += H + margin * 2;
+    if (a.y > H + margin) a.y -= H + margin * 2;
+  }
+}
+
 // === MAIN LOOP ===
 let lastTime = performance.now();
 
@@ -101,6 +169,7 @@ function loop(t) {
   lastTime = t;
 
   lerpField(dt);
+  updateAgents(t, dt);
 
   ctx.clearRect(0, 0, W, H);
 
@@ -122,7 +191,7 @@ function loop(t) {
   requestAnimationFrame(loop);
 }
 
-setInterval(() => randomizeFieldTarget(), 5000);
+setInterval(() => randomizeFieldTarget(), 6000);
 requestAnimationFrame(loop);
 </script>
 </body>
