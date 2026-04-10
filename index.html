@@ -33,6 +33,52 @@ function resize() {
 resize();
 addEventListener('resize', resize);
 
+// === FIELD ===
+const field = {
+  energy: 0.5,
+  warmth: 0.5,
+  rotation: 0,
+  flowX: 0,
+  flowY: 0,
+  cohesion: 0.5,
+  pulse: 0,
+};
+
+const fieldTarget = {
+  energy: 0.5,
+  warmth: 0.5,
+  rotation: 0,
+  flowX: 0,
+  flowY: 0,
+  cohesion: 0.5,
+  pulse: 0,
+};
+
+function lerpField(dt) {
+  const keys = Object.keys(field);
+  for (const k of keys) {
+    field[k] += (fieldTarget[k] - field[k]) * 0.0005 * dt;
+  }
+}
+
+// Entropy source: mix performance.now() into every random decision
+// so no two moments in time can produce the same sequence (spec: 永不重複)
+function entropy() {
+  const t = performance.now();
+  const s = Math.sin(t * 12345.6789 + t * t * 0.001) * 0.5 + 0.5;
+  return (Math.random() + s) % 1;
+}
+
+function randomizeFieldTarget() {
+  fieldTarget.energy = entropy();
+  fieldTarget.warmth = entropy();
+  fieldTarget.rotation = (entropy() - 0.5) * 2;
+  fieldTarget.flowX = (entropy() - 0.5) * 2;
+  fieldTarget.flowY = (entropy() - 0.5) * 2;
+  fieldTarget.cohesion = entropy();
+  fieldTarget.pulse = entropy();
+}
+
 // === AGENTS 眾生 ===
 const NUM_AGENTS = 200;
 const agents = [];
@@ -48,7 +94,14 @@ for (let i = 0; i < NUM_AGENTS; i++) {
 }
 
 // === MAIN LOOP ===
+let lastTime = performance.now();
+
 function loop(t) {
+  const dt = t - lastTime;
+  lastTime = t;
+
+  lerpField(dt);
+
   ctx.clearRect(0, 0, W, H);
 
   for (const a of agents) {
@@ -58,8 +111,18 @@ function loop(t) {
     ctx.fill();
   }
 
+  // Temporary debug
+  ctx.fillStyle = 'rgba(255,255,255,0.15)';
+  ctx.font = '11px monospace';
+  const keys = Object.keys(field);
+  for (let i = 0; i < keys.length; i++) {
+    ctx.fillText(`${keys[i]}: ${field[keys[i]].toFixed(3)}`, 10, 20 + i * 14);
+  }
+
   requestAnimationFrame(loop);
 }
+
+setInterval(() => randomizeFieldTarget(), 5000);
 requestAnimationFrame(loop);
 </script>
 </body>
