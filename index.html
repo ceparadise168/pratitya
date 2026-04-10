@@ -9,31 +9,113 @@
 html, body { width: 100%; height: 100%; overflow: hidden; background: #000; cursor: none; }
 canvas { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; }
 #trace { z-index: 0; }
-#main  { z-index: 1; }
+#core  { z-index: 1; }
+#main  { z-index: 2; }
 </style>
 </head>
 <body>
 <canvas id="trace"></canvas>
+<canvas id="core"></canvas>
 <canvas id="main"></canvas>
 <script>
-// === CANVAS ===
-const mainCanvas = document.getElementById('main');
+// ============================================================
+//  緣 v4 — 生成式法像
+//  Generative thangka-inspired artwork
+//  Three concentric layers: core grid / active band / void edge
+// ============================================================
+
+// === CANVAS SETUP ===
 const traceCanvas = document.getElementById('trace');
-const ctx = mainCanvas.getContext('2d');
+const coreCanvas  = document.getElementById('core');
+const mainCanvas  = document.getElementById('main');
 const traceCtx = traceCanvas.getContext('2d');
-let W, H;
+const coreCtx  = coreCanvas.getContext('2d');
+const ctx      = mainCanvas.getContext('2d');
+let W, H, CX, CY, R, dpr;
+
 function resize() {
-  W = mainCanvas.width = traceCanvas.width = innerWidth;
-  H = mainCanvas.height = traceCanvas.height = innerHeight;
+  // [Fix #2] Handle devicePixelRatio: canvas dimensions x dpr, CSS unchanged
+  dpr = window.devicePixelRatio || 1;
+  W = innerWidth;
+  H = innerHeight;
+  const cw = W * dpr;
+  const ch = H * dpr;
+  for (const c of [traceCanvas, coreCanvas, mainCanvas]) {
+    c.width = cw;
+    c.height = ch;
+  }
+  traceCtx.scale(dpr, dpr);
+  coreCtx.scale(dpr, dpr);
+  ctx.scale(dpr, dpr);
+
+  CX = W / 2;
+  CY = H / 2;
+  R = Math.min(W, H) * 0.45;
+
+  // [Fix #1] Guard drawCoreGrid call
+  if (typeof drawCoreGrid === 'function') drawCoreGrid();
 }
 resize();
 addEventListener('resize', resize);
 
 // === ENTROPY ===
+// [Fix #5] Better distribution: average of two uniform randoms
 function entropy() {
-  const t = performance.now();
-  const s = Math.sin(t * 12345.6789 + t * t * 0.001) * 0.5 + 0.5;
-  return (Math.random() + s) % 1;
+  return (Math.random() + Math.random()) * 0.5;
+}
+
+// === PALETTE ===
+const PALETTE = {
+  deepBlue:  { h: 220, s: 75, l: 25 },
+  vermilion: { h: 5,   s: 80, l: 45 },
+  emerald:   { h: 155, s: 65, l: 30 },
+  gold:      { h: 45,  s: 85, l: 55 },
+  purple:    { h: 280, s: 60, l: 25 },
+  warmWhite: { h: 40,  s: 30, l: 85 },
+};
+
+const PAIRS = [
+  ['gold', 'deepBlue'],
+  ['vermilion', 'emerald'],
+  ['warmWhite', 'purple'],
+  ['gold', 'vermilion'],
+];
+
+function hsl(color, alpha) {
+  const c = PALETTE[color];
+  return `hsla(${c.h}, ${c.s}%, ${c.l}%, ${alpha})`;
+}
+
+// [Fix #9] Color pair selection: collect all pairs containing primary,
+// choose based on field state (gold+vermilion when energy>0.8 && warmth>0.7)
+function fieldPrimaryColor() {
+  if (field.energy > 0.6) return derived.warmth > 0.6 ? 'vermilion' : 'gold';
+  if (field.order > 0.6) return 'gold';
+  if (field.energy < 0.3) return field.order > 0.5 ? 'deepBlue' : 'purple';
+  return 'deepBlue';
+}
+
+function fieldSecondaryColor() {
+  const primary = fieldPrimaryColor();
+  // Collect all pairs that contain primary
+  const matching = PAIRS.filter(p => p.includes(primary));
+  if (matching.length === 0) return 'deepBlue';
+
+  // [Fix #9] Special rare pair: gold+vermilion at peak energy+warmth
+  if (field.energy > 0.8 && derived.warmth > 0.7) {
+    const rarePair = matching.find(p => p.includes('gold') && p.includes('vermilion'));
+    if (rarePair) return rarePair.find(c => c !== primary);
+  }
+
+  // Otherwise pick based on field state hash
+  const idx = Math.floor(field.energy * 17 + field.order * 13) % matching.length;
+  return matching[idx].find(c => c !== primary) || 'deepBlue';
+}
+
+// [Fix #10] colorMaturity growth rate: dt * 0.000012 (~83s to reach 1)
+let colorMaturity = 0;
+function updateColorMaturity(dt) {
+  if (colorMaturity < 1) colorMaturity = Math.min(1, colorMaturity + dt * 0.000012);
 }
 
 // === FIELD ===
@@ -41,26 +123,34 @@ const field = { energy: 0.3, order: 0.5 };
 const fieldTarget = { energy: 0.3, order: 0.5 };
 const derived = { warmth: 0.5, rotation: 0, flowX: 0, flowY: 0, pulse: 0 };
 
+// [Fix #3] Rotation direction stored as state, only changed in chooseNextTarget
+let rotationDirection = 1;
+
 function deriveParams() {
   const e = field.energy, o = field.order;
   derived.warmth = e * 0.6 + (1 - o) * 0.4;
-  derived.rotation = (entropy() > 0.5 ? 1 : -1) * e * (1 - Math.abs(o - 0.5) * 2) * 0.8;
+  // [Fix #3] Use stored rotationDirection, do not re-roll
+  derived.rotation = rotationDirection * e * (1 - Math.abs(o - 0.5) * 2) * 0.8;
   const flowStrength = e * (1 - o) * 1.5;
   derived.flowX = (entropy() - 0.5) * 2 * flowStrength;
   derived.flowY = (entropy() - 0.5) * 2 * flowStrength;
   derived.pulse = (1 - Math.abs(e - 0.5) * 2) * 0.6;
 }
 
+// [Fix #4] lerpField acceleration: increase quadratic coefficient to 0.02
 function lerpField(dt) {
   const de = fieldTarget.energy - field.energy;
   const dor = fieldTarget.order - field.order;
   const dist = Math.sqrt(de * de + dor * dor);
-  const rate = (0.0003 + dist * dist * 0.005) * dt;
+  const rate = (0.0003 + dist * dist * 0.02) * dt;
   field.energy += de * rate;
   field.order += dor * rate;
 }
 
 function chooseNextTarget() {
+  // [Fix #3] Change rotation direction here only
+  rotationDirection = entropy() > 0.5 ? 1 : -1;
+
   const isJump = entropy() < 0.3;
   const range = isJump ? 0.8 : 0.3;
   let ne = field.energy + (entropy() - 0.5) * 2 * range;
@@ -92,113 +182,607 @@ function updateMacro(dt) {
   abundance += (abundanceTarget - abundance) * 0.00005 * dt;
 }
 
-// === AGENTS ===
-const NUM_AGENTS = 40;
-const agents = [];
+// === CORE GRID ===
+function drawCoreGrid() {
+  coreCtx.save();
+  coreCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  coreCtx.clearRect(0, 0, W, H);
+  coreCtx.strokeStyle = hsl('gold', 0.1);
+  coreCtx.lineWidth = 0.5;
 
-function spawnAgent() {
+  // [Fix #6] Concentric circles: use cr *= 1.5 (not phi*0.6 which ~0.97 causing near-infinite loop)
+  let cr = R * 0.05;
+  while (cr < R) {
+    coreCtx.beginPath();
+    coreCtx.arc(CX, CY, cr, 0, Math.PI * 2);
+    coreCtx.stroke();
+    cr *= 1.5;
+  }
+
+  // Radial lines (16-fold)
+  const spokes = 16;
+  for (let i = 0; i < spokes; i++) {
+    const angle = (i / spokes) * Math.PI * 2;
+    coreCtx.beginPath();
+    coreCtx.moveTo(CX, CY);
+    coreCtx.lineTo(CX + Math.cos(angle) * R * 0.8, CY + Math.sin(angle) * R * 0.8);
+    coreCtx.stroke();
+  }
+
+  // Cross axes (slightly brighter)
+  coreCtx.strokeStyle = hsl('gold', 0.14);
+  coreCtx.lineWidth = 0.7;
+  coreCtx.beginPath();
+  coreCtx.moveTo(CX - R * 0.8, CY); coreCtx.lineTo(CX + R * 0.8, CY);
+  coreCtx.moveTo(CX, CY - R * 0.8); coreCtx.lineTo(CX, CY + R * 0.8);
+  coreCtx.stroke();
+
+  // [Fix #7] Non-uniform proportion arcs (1:2:3:5 ratio based) to hint at body structure
+  coreCtx.strokeStyle = hsl('gold', 0.07);
+  coreCtx.lineWidth = 0.4;
+  const ratios = [1, 2, 3, 5];
+  const totalRatio = ratios.reduce((a, b) => a + b, 0);
+  let cumulative = 0;
+  for (const ratio of ratios) {
+    cumulative += ratio;
+    const ar = R * (cumulative / totalRatio) * 0.75;
+    // Quarter arcs at cardinal points with non-uniform spans
+    for (let q = 0; q < 4; q++) {
+      const startAngle = (q / 4) * Math.PI * 2 - Math.PI / 8;
+      const span = (Math.PI / 4) * (ratio / 3); // non-uniform arc spans
+      coreCtx.beginPath();
+      coreCtx.arc(CX, CY, ar, startAngle, startAngle + span);
+      coreCtx.stroke();
+    }
+  }
+  coreCtx.restore();
+}
+
+// [Fix #8] Core breath CSS: 0.5 + sin * 0.35
+let coreBreathPhase = 0;
+function updateCoreBreath(dt) {
+  coreBreathPhase += dt * 0.0001; // full cycle ~60s
+  coreCanvas.style.opacity = 0.5 + Math.sin(coreBreathPhase) * 0.35;
+}
+
+// === PATTERNS ===
+const bgPatterns = [];
+const beingPatterns = [];
+
+// Track dead pattern positions for inheritance [Fix #16]
+let deadPatternRecords = [];
+// Track being vacancy timers [Fix #25]
+let beingVacancies = [];
+// Limit spawning per frame [Fix #18]
+let spawnedThisFrame = 0;
+
+function spawnBgPattern(inheritRecord) {
+  const types = ['arc', 'spiral', 'ray', 'ring'];
+  // Weight by field state
+  const weights = [
+    1 + field.order * 2,
+    1 + field.energy * 2,
+    0.5 + field.energy * (1 - field.order),
+    0.5 + field.order,
+  ];
+  const total = weights.reduce((a, b) => a + b, 0);
+  let rv = entropy() * total;
+  let type = types[0];
+  for (let i = 0; i < weights.length; i++) {
+    rv -= weights[i];
+    if (rv <= 0) { type = types[i]; break; }
+  }
+
+  let dist, theta;
+
+  // [Fix #16] Inherit position from dead pattern if available
+  if (inheritRecord) {
+    dist = inheritRecord.r + (entropy() - 0.5) * R * 0.1;
+    theta = inheritRecord.theta + (entropy() - 0.5) * 0.3;
+    type = inheritRecord.type; // inherit type from dead pattern
+  } else {
+    dist = R * (0.1 + entropy() * 0.7);
+    theta = entropy() * Math.PI * 2;
+  }
+
+  dist = Math.max(R * 0.05, Math.min(R * 0.85, dist));
+
+  let maxLife = 3000 + entropy() * 15000;
+  // [Fix #11] Distance-driven gradient
+  maxLife *= (1.5 - dist / R);
+
+  const baseRotSpeed = (entropy() - 0.5) * 0.0003;
+
   return {
-    x: W * (0.2 + entropy() * 0.6),
-    y: H * (0.2 + entropy() * 0.6),
-    vx: 0, vy: 0,
-    mass: 1 + entropy() * 4,
-    lifespan: 3000 + entropy() * 60000,
+    type,
+    r: dist,
+    theta,
     age: 0,
+    maxLife,
     alpha: 0,
-    alive: true,
-    phase: entropy() * Math.PI * 2,
+    // Type-specific params
+    arcSpan: 0.2 + entropy() * 0.6,
+    spiralTurns: 1 + entropy() * 2,
+    rayLength: R * (0.1 + entropy() * 0.3),
+    ringSpan: 0.3 + entropy() * 1.2,
+    lineWidth: 0.5 + entropy() * 1.5,
+    colorKey: entropy() > 0.5 ? fieldPrimaryColor() : fieldSecondaryColor(),
+    // [Fix #11] rotSpeed and lineWidth scaled by distance
+    rotSpeed: baseRotSpeed * (dist / R),
+    isBeing: false,
+    // [Fix #15] Birth animation: track target spans for grow-in effect
+    birthArcSpan: 0,
+    targetArcSpan: 0.2 + entropy() * 0.6,
+    birthRingSpan: 0,
+    targetRingSpan: 0.3 + entropy() * 1.2,
   };
 }
 
-for (let i = 0; i < NUM_AGENTS; i++) {
-  const a = spawnAgent();
-  a.age = entropy() * a.lifespan * 0.5;
-  a.alpha = 1;
-  agents.push(a);
+// [Fix #11] Apply distance-driven lineWidth adjustment at render time
+function distanceLineWidth(p) {
+  return p.lineWidth * (1.2 - p.r / R * 0.4);
 }
 
-function updateAgentLife(a, dt) {
-  a.age += dt;
-  if (a.age < 2000) {
-    a.alpha = a.age / 2000;
-  } else if (a.age > a.lifespan - 2000) {
-    a.alpha = Math.max(0, (a.lifespan - a.age) / 2000);
+function updatePatternLife(p, dt) {
+  p.age += dt;
+  p.theta += p.rotSpeed * dt;
+  // Fade in/out
+  const fadeTime = 1500;
+  if (p.age < fadeTime) {
+    p.alpha = p.age / fadeTime;
+    // [Fix #15] Birth animation: grow arc/ring spans during fadeIn
+    if (p.type === 'arc') {
+      p.arcSpan = p.targetArcSpan * (p.age / fadeTime);
+    } else if (p.type === 'ring') {
+      p.ringSpan = p.targetRingSpan * (p.age / fadeTime);
+    }
+  } else if (p.age > p.maxLife - fadeTime) {
+    p.alpha = Math.max(0, (p.maxLife - p.age) / fadeTime);
   } else {
-    a.alpha = 1;
+    p.alpha = 1;
+    p.arcSpan = p.targetArcSpan;
+    p.ringSpan = p.targetRingSpan;
   }
-  if (a.age >= a.lifespan) {
-    const idx = agents.indexOf(a);
-    if (idx !== -1) agents[idx] = spawnAgent();
+  return p.age < p.maxLife;
+}
+
+function managePatterns(dt) {
+  spawnedThisFrame = 0;
+  // Update existing
+  for (let i = bgPatterns.length - 1; i >= 0; i--) {
+    if (!updatePatternLife(bgPatterns[i], dt)) {
+      // [Fix #16] Record dead pattern's position/type for inheritance
+      const dead = bgPatterns[i];
+      deadPatternRecords.push({ r: dead.r, theta: dead.theta, type: dead.type });
+      if (deadPatternRecords.length > 20) deadPatternRecords.shift();
+      bgPatterns.splice(i, 1);
+    }
+  }
+  // [Fix #12] Minimum pattern count: min 3
+  const targetCount = Math.floor(3 + field.energy * 35 + field.order * 12);
+  while (bgPatterns.length < targetCount && spawnedThisFrame < 3) { // [Fix #18] max 3 per frame
+    // [Fix #16] Spawn from dead records when available
+    const inherit = deadPatternRecords.length > 0 ? deadPatternRecords.shift() : null;
+    bgPatterns.push(spawnBgPattern(inherit));
+    spawnedThisFrame++;
   }
 }
 
-function updateAgentPhysics(a, t, dt) {
-  const cx = W / 2, cy = H / 2;
-  const e = field.energy, o = field.order;
-  const speed = (0.3 + e * 3.0) / a.mass;
-  let fx = 0, fy = 0;
+// === PATTERN RENDERING ===
+function renderPattern(p) {
+  if (p.alpha < 0.01) return;
+  const fadeFromCenter = Math.min(1, p.r / (R * 0.2));
+  const fadeAtEdge = Math.max(0, 1 - (p.r / R - 0.7) / 0.3);
 
-  fx += derived.flowX * speed * 0.6;
-  fy += derived.flowY * speed * 0.6;
-
-  const dx = a.x - cx, dy = a.y - cy;
-  const dist = Math.sqrt(dx * dx + dy * dy) + 1;
-  fx += (-dy / dist) * derived.rotation * speed;
-  fy += (dx / dist) * derived.rotation * speed;
-
-  const cohForce = (o - 0.3) * 2;
-  fx += (-dx / dist) * cohForce * speed * 0.3;
-  fy += (-dy / dist) * cohForce * speed * 0.3;
-
-  const pulseWave = Math.sin(t * 0.004 * (0.5 + derived.pulse * 2));
-  fx += (dx / dist) * pulseWave * derived.pulse * speed * 0.4;
-  fy += (dy / dist) * pulseWave * derived.pulse * speed * 0.4;
-
-  if (o > 0.7 && e < 0.3) {
-    const mandalaStrength = (o - 0.7) * (0.3 - e) * 10;
-    const angle = Math.atan2(dy, dx);
-    const symmetry = 8;
-    const sector = (Math.PI * 2) / symmetry;
-    const snapped = Math.round(angle / sector) * sector;
-    const ringDist = 40 + (agents.indexOf(a) % 5) * 45;
-    const tx = cx + Math.cos(snapped) * ringDist;
-    const ty = cy + Math.sin(snapped) * ringDist;
-    fx += (tx - a.x) * mandalaStrength * 0.008;
-    fy += (ty - a.y) * mandalaStrength * 0.008;
+  // [Fix #28] Directional breathing: BIRTH uses r-based delay, DYING uses r-based delay
+  let dirAlpha = 1;
+  if (breathState === BREATH.BIRTH) {
+    // Inner patterns appear first: delay = r/R * birthDur * 0.5
+    const rDelay = (p.r / R) * birthDur * 0.5;
+    const adjusted = Math.max(0, breathTimer - rDelay);
+    dirAlpha = Math.min(1, adjusted / 1500);
+  } else if (breathState === BREATH.DYING) {
+    // Outer patterns fade first
+    const rDelay = (1 - p.r / R) * dyingDur * 0.5;
+    const adjusted = Math.max(0, breathTimer - rDelay);
+    let fadeProgress = Math.min(1, adjusted / 1500);
+    // [Fix #29] Final 5%: snap alpha to 0 instantly
+    if (fadeProgress > 0.95) fadeProgress = 1;
+    dirAlpha = 1 - fadeProgress;
   }
 
-  if (o > 0.4 && e < 0.6) {
-    for (let j = 0; j < agents.length; j++) {
-      const b = agents[j];
-      if (b === a || !b.alive) continue;
-      const bx = b.x - a.x, by = b.y - a.y;
-      const bd = Math.sqrt(bx * bx + by * by);
-      if (bd < 80 && bd > 15) {
-        fx += (bx / bd) * 0.05 * o;
-        fy += (by / bd) * 0.05 * o;
+  const a = p.alpha * breathAlpha * colorMaturity * fadeFromCenter * Math.min(1, fadeAtEdge) * dirAlpha;
+  if (a < 0.005) return;
+
+  ctx.strokeStyle = hsl(p.colorKey, a * 0.7);
+  ctx.lineWidth = distanceLineWidth(p);
+  ctx.lineCap = 'round';
+
+  switch (p.type) {
+    case 'arc': {
+      // [Fix #14] Arc petal shape: two arcs sharing endpoints with different radii (pointed petal)
+      const startAngle = p.theta - p.arcSpan / 2;
+      const endAngle = p.theta + p.arcSpan / 2;
+      // Outer arc
+      ctx.beginPath();
+      ctx.arc(CX, CY, p.r, startAngle, endAngle);
+      ctx.stroke();
+      // Inner arc with smaller radius sharing approximate endpoints — forms pointed petal
+      const innerR = p.r * 0.85;
+      // Compute shared endpoints
+      const sx = CX + Math.cos(startAngle) * p.r;
+      const sy = CY + Math.sin(startAngle) * p.r;
+      const ex = CX + Math.cos(endAngle) * p.r;
+      const ey = CY + Math.sin(endAngle) * p.r;
+      ctx.beginPath();
+      ctx.moveTo(sx, sy);
+      // Inner arc: use a slightly different center offset to create petal shape
+      const midAngle = (startAngle + endAngle) / 2;
+      const petalDepth = (p.r - innerR) * 1.5;
+      const cpx = CX + Math.cos(midAngle) * (p.r - petalDepth);
+      const cpy = CY + Math.sin(midAngle) * (p.r - petalDepth);
+      ctx.quadraticCurveTo(cpx, cpy, ex, ey);
+      ctx.stroke();
+      break;
+    }
+    case 'spiral': {
+      ctx.beginPath();
+      // [Fix #17] Steps proportional to distance from center
+      const steps = Math.floor(15 + 15 * (1 - p.r / R));
+      for (let s = 0; s <= steps; s++) {
+        const t = s / steps;
+        const sr = p.r - t * p.r * 0.3;
+        const sa = p.theta + t * p.spiralTurns * Math.PI * 0.5;
+        const sx = CX + Math.cos(sa) * sr;
+        const sy = CY + Math.sin(sa) * sr;
+        if (s === 0) {
+          ctx.moveTo(sx, sy);
+        } else {
+          // [Fix #13] Control point offset: use R * 0.01 not hardcoded 5
+          ctx.quadraticCurveTo(
+            CX + Math.cos(sa - 0.1) * (sr + R * 0.01),
+            CY + Math.sin(sa - 0.1) * (sr + R * 0.01),
+            sx, sy
+          );
+        }
       }
-      if (bd < 15) {
-        fx -= (bx / bd) * 0.2;
-        fy -= (by / bd) * 0.2;
+      ctx.stroke();
+      break;
+    }
+    case 'ray': {
+      const x = CX + Math.cos(p.theta) * p.r;
+      const y = CY + Math.sin(p.theta) * p.r;
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      const endR = p.r + p.rayLength;
+      ctx.lineTo(CX + Math.cos(p.theta) * endR, CY + Math.sin(p.theta) * endR);
+      ctx.stroke();
+      break;
+    }
+    case 'ring': {
+      ctx.beginPath();
+      ctx.arc(CX, CY, p.r, p.theta, p.theta + p.ringSpan);
+      ctx.stroke();
+      break;
+    }
+  }
+}
+
+// === BEINGS (眾生) ===
+// Each being is a trackable individual with distinct visual signature
+
+// [Fix #20] Dedicated colors for beings — cycle through palette keys
+const BEING_COLORS = ['gold', 'vermilion', 'emerald', 'deepBlue', 'purple', 'warmWhite'];
+let beingColorIdx = 0;
+
+function spawnBeing(inheritR, inheritTheta, inheritType, inheritArcSpan) {
+  const dist = (inheritR !== undefined) ? inheritR : R * (0.15 + entropy() * 0.5); // [Fix #26]
+  const theta = (inheritTheta !== undefined) ? inheritTheta : entropy() * Math.PI * 2; // [Fix #26]
+
+  // [Fix #26] Inherit type + arcSpan from predecessor
+  const type = (inheritType !== undefined) ? inheritType : ['arc', 'spiral'][Math.floor(entropy() * 2)];
+  const arcSpan = (inheritArcSpan !== undefined) ? inheritArcSpan : (0.3 + entropy() * 0.5);
+
+  // [Fix #20] Dedicated color from PALETTE, not field-dependent
+  const colorKey = BEING_COLORS[beingColorIdx % BEING_COLORS.length];
+  beingColorIdx++;
+
+  return {
+    type,
+    r: Math.max(R * 0.05, Math.min(R * 0.7, dist)),
+    theta,
+    age: 0,
+    maxLife: 15000 + entropy() * 45000,
+    alpha: 0,
+    arcSpan,
+    spiralTurns: 1.5 + entropy() * 1.5,
+    // [Fix #20] Min lineWidth 1.5
+    lineWidth: Math.max(1.5, 1 + entropy() * 1.5),
+    colorKey,
+    rotSpeed: (entropy() - 0.5) * 0.0002,
+    isBeing: true,
+    // Signature variations
+    curveBias: (entropy() - 0.5) * 20,
+    sizeScale: 0.8 + entropy() * 0.4,
+    phaseOffset: entropy() * Math.PI * 2,
+    dying: false,
+    deathTimer: 0,
+    fragments: [],
+  };
+}
+
+function renderBeing(b) {
+  if (b.alpha < 0.01 && !b.dying) return;
+  const fadeFromCenter = Math.min(1, b.r / (R * 0.15));
+
+  // [Fix #28] Directional breathing for beings
+  let dirAlpha = 1;
+  if (breathState === BREATH.BIRTH) {
+    const rDelay = (b.r / R) * birthDur * 0.5;
+    const adjusted = Math.max(0, breathTimer - rDelay);
+    dirAlpha = Math.min(1, adjusted / 2000);
+  } else if (breathState === BREATH.DYING) {
+    const rDelay = (1 - b.r / R) * dyingDur * 0.5;
+    const adjusted = Math.max(0, breathTimer - rDelay);
+    let fadeProgress = Math.min(1, adjusted / 2000);
+    // [Fix #29] Final 5%: snap alpha to 0
+    if (fadeProgress > 0.95) fadeProgress = 1;
+    dirAlpha = 1 - fadeProgress;
+  }
+
+  const a = b.alpha * breathAlpha * colorMaturity * fadeFromCenter * dirAlpha;
+  if (a < 0.005 && !b.dying) return;
+
+  // [Fix #20] Faint shadowBlur for beings
+  ctx.shadowColor = hsl(b.colorKey, a * 0.3);
+  ctx.shadowBlur = 4;
+
+  ctx.strokeStyle = hsl(b.colorKey, a * 0.85);
+  ctx.lineWidth = b.lineWidth * b.sizeScale;
+  ctx.lineCap = 'round';
+
+  if (b.dying) {
+    ctx.shadowBlur = 0;
+    // Death animation: fragments scatter
+    for (const f of b.fragments) {
+      f.r += f.vr * 0.5;
+      f.theta += f.vt;
+      // [Fix #23] Add friction
+      f.vr *= 0.96;
+      f.alpha *= 0.97;
+      if (f.alpha < 0.01) continue;
+      const fx = CX + Math.cos(f.theta) * f.r;
+      const fy = CY + Math.sin(f.theta) * f.r;
+      ctx.strokeStyle = hsl(b.colorKey, f.alpha * breathAlpha);
+      ctx.lineWidth = f.width;
+      ctx.beginPath();
+      ctx.moveTo(fx, fy);
+      ctx.lineTo(fx + Math.cos(f.angle) * f.len, fy + Math.sin(f.angle) * f.len);
+      ctx.stroke();
+    }
+    return;
+  }
+
+  // Living: draw with cubic bezier for higher quality [Fix #19]
+  if (b.type === 'arc') {
+    const span = b.arcSpan * b.sizeScale;
+    const steps = 8;
+    ctx.beginPath();
+    for (let s = 0; s <= steps; s++) {
+      const t = s / steps;
+      const angle = b.theta - span / 2 + t * span;
+      // [Fix #27] Wobble amplitude capped at R * 0.005
+      const maxWobble = R * 0.005;
+      const rawWobble = Math.sin(t * Math.PI * 3 + b.phaseOffset + b.age * 0.001) * b.curveBias * 0.1;
+      const wobble = Math.max(-maxWobble, Math.min(maxWobble, rawWobble));
+      const pr = b.r + wobble;
+      const px = CX + Math.cos(angle) * pr;
+      const py = CY + Math.sin(angle) * pr;
+      if (s === 0) { ctx.moveTo(px, py); continue; }
+      // [Fix #19] MUST use bezierCurveTo not quadraticCurveTo
+      const prevAngle = b.theta - span / 2 + ((s - 1) / steps) * span;
+      const cpR = b.r + b.curveBias * 0.3;
+      const cp1x = CX + Math.cos(prevAngle + span / steps * 0.3) * cpR;
+      const cp1y = CY + Math.sin(prevAngle + span / steps * 0.3) * cpR;
+      const cp2x = CX + Math.cos(angle - span / steps * 0.3) * cpR;
+      const cp2y = CY + Math.sin(angle - span / steps * 0.3) * cpR;
+      ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, px, py);
+    }
+    ctx.stroke();
+  } else {
+    // [Fix #19] Spiral branch MUST use bezierCurveTo
+    ctx.beginPath();
+    const steps = 20;
+    for (let s = 0; s <= steps; s++) {
+      const t = s / steps;
+      const sr = b.r * (1 - t * 0.3) * b.sizeScale;
+      const sa = b.theta + t * b.spiralTurns * Math.PI * 0.5;
+      // [Fix #27] Cap wobble amplitude
+      const maxWobble = R * 0.005;
+      const rawWobble = Math.sin(t * Math.PI * 2 + b.phaseOffset + b.age * 0.0008) * b.curveBias * 0.15;
+      const wobble = Math.max(-maxWobble, Math.min(maxWobble, rawWobble));
+      const sx = CX + Math.cos(sa) * (sr + wobble);
+      const sy = CY + Math.sin(sa) * (sr + wobble);
+      if (s === 0) { ctx.moveTo(sx, sy); continue; }
+      const prevT = (s - 1) / steps;
+      const prevR = b.r * (1 - prevT * 0.3) * b.sizeScale;
+      const prevA = b.theta + prevT * b.spiralTurns * Math.PI * 0.5;
+      // Cubic bezier with two control points for S-curve quality
+      const midT = (prevT + t) / 2;
+      const midR = b.r * (1 - midT * 0.3) * b.sizeScale;
+      const midA = b.theta + midT * b.spiralTurns * Math.PI * 0.5;
+      const cp1x = CX + Math.cos(prevA + (midA - prevA) * 0.4) * (prevR + b.curveBias * 0.2);
+      const cp1y = CY + Math.sin(prevA + (midA - prevA) * 0.4) * (prevR + b.curveBias * 0.2);
+      const cp2x = CX + Math.cos(midA + (sa - midA) * 0.6) * (midR + b.curveBias * 0.15);
+      const cp2y = CY + Math.sin(midA + (sa - midA) * 0.6) * (midR + b.curveBias * 0.15);
+      ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, sx, sy);
+    }
+    ctx.stroke();
+  }
+
+  // Reset shadow
+  ctx.shadowBlur = 0;
+}
+
+// [Fix #21] stampBeingTrace must draw actual being shape, not just arc
+function stampBeingTrace(b) {
+  traceCtx.save();
+  traceCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  traceCtx.globalAlpha = 0.2;
+  traceCtx.strokeStyle = hsl(b.colorKey, 0.3);
+  traceCtx.lineWidth = b.lineWidth * 0.5;
+  traceCtx.lineCap = 'round';
+
+  if (b.type === 'arc') {
+    const span = b.arcSpan * b.sizeScale;
+    const steps = 8;
+    traceCtx.beginPath();
+    for (let s = 0; s <= steps; s++) {
+      const t = s / steps;
+      const angle = b.theta - span / 2 + t * span;
+      const pr = b.r;
+      const px = CX + Math.cos(angle) * pr;
+      const py = CY + Math.sin(angle) * pr;
+      if (s === 0) { traceCtx.moveTo(px, py); continue; }
+      const prevAngle = b.theta - span / 2 + ((s - 1) / steps) * span;
+      const cpR = b.r + b.curveBias * 0.3;
+      const cp1x = CX + Math.cos(prevAngle + span / steps * 0.3) * cpR;
+      const cp1y = CY + Math.sin(prevAngle + span / steps * 0.3) * cpR;
+      const cp2x = CX + Math.cos(angle - span / steps * 0.3) * cpR;
+      const cp2y = CY + Math.sin(angle - span / steps * 0.3) * cpR;
+      traceCtx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, px, py);
+    }
+    traceCtx.stroke();
+  } else {
+    // Spiral trace
+    traceCtx.beginPath();
+    const steps = 20;
+    for (let s = 0; s <= steps; s++) {
+      const t = s / steps;
+      const sr = b.r * (1 - t * 0.3) * b.sizeScale;
+      const sa = b.theta + t * b.spiralTurns * Math.PI * 0.5;
+      const sx = CX + Math.cos(sa) * sr;
+      const sy = CY + Math.sin(sa) * sr;
+      if (s === 0) { traceCtx.moveTo(sx, sy); continue; }
+      const prevT = (s - 1) / steps;
+      const prevR = b.r * (1 - prevT * 0.3) * b.sizeScale;
+      const prevA = b.theta + prevT * b.spiralTurns * Math.PI * 0.5;
+      const midT = (prevT + t) / 2;
+      const midR = b.r * (1 - midT * 0.3) * b.sizeScale;
+      const midA = b.theta + midT * b.spiralTurns * Math.PI * 0.5;
+      const cp1x = CX + Math.cos(prevA + (midA - prevA) * 0.4) * (prevR + b.curveBias * 0.15);
+      const cp1y = CY + Math.sin(prevA + (midA - prevA) * 0.4) * (prevR + b.curveBias * 0.15);
+      const cp2x = CX + Math.cos(midA + (sa - midA) * 0.6) * midR;
+      const cp2y = CY + Math.sin(midA + (sa - midA) * 0.6) * midR;
+      traceCtx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, sx, sy);
+    }
+    traceCtx.stroke();
+  }
+
+  traceCtx.globalAlpha = 1.0;
+  traceCtx.restore();
+}
+
+function updateBeing(b, dt) {
+  if (b.dying) {
+    b.deathTimer += dt;
+    return b.deathTimer < 3000;
+  }
+  b.age += dt;
+  b.theta += b.rotSpeed * dt;
+  // Fade in/out
+  if (b.age < 2500) {
+    b.alpha = b.age / 2500;
+  } else if (b.age > b.maxLife - 2000) {
+    b.alpha = Math.max(0, (b.maxLife - b.age) / 2000);
+  } else {
+    b.alpha = 1;
+  }
+  // [Fix #24] Death trigger at alpha <= 0.01, not waiting 2s gap
+  if (b.alpha <= 0.01 && b.age > 2500 && !b.dying) {
+    b.dying = true;
+    b.deathTimer = 0;
+    // Create fragments
+    const numFrags = 5 + Math.floor(entropy() * 8);
+    for (let i = 0; i < numFrags; i++) {
+      b.fragments.push({
+        r: b.r + (entropy() - 0.5) * 20,
+        theta: b.theta + (entropy() - 0.5) * b.arcSpan,
+        // [Fix #23] Fragment velocity range (entropy()-0.5)*8
+        vr: (entropy() - 0.5) * 8,
+        vt: (entropy() - 0.5) * 0.01,
+        angle: entropy() * Math.PI * 2,
+        len: 3 + entropy() * 10,
+        width: 0.3 + entropy() * 0.8,
+        alpha: 0.6 + entropy() * 0.4,
+      });
+    }
+    // Stamp to trace -- only beings leave marks
+    stampBeingTrace(b);
+  }
+  return true;
+}
+
+function manageBeings(dt) {
+  // Update vacancies [Fix #25]
+  for (let i = beingVacancies.length - 1; i >= 0; i--) {
+    beingVacancies[i].timer -= dt;
+    if (beingVacancies[i].timer <= 0) {
+      // [Fix #26] Inherit type + arcSpan from predecessor
+      const v = beingVacancies[i];
+      if (spawnedThisFrame < 3) { // [Fix #18]
+        beingPatterns.push(spawnBeing(
+          v.r + (entropy() - 0.5) * R * 0.2,
+          v.theta + (entropy() - 0.5) * 0.5,
+          v.type,
+          v.arcSpan
+        ));
+        spawnedThisFrame++;
       }
+      beingVacancies.splice(i, 1);
     }
   }
 
-  a.phase += 0.01 + e * 0.02;
-  fx += Math.sin(a.phase) * 0.15;
-  fy += Math.cos(a.phase * 1.3) * 0.15;
+  for (let i = beingPatterns.length - 1; i >= 0; i--) {
+    if (!updateBeing(beingPatterns[i], dt)) {
+      const dead = beingPatterns[i];
+      // [Fix #25] Delay before replacement: 3-8s vacancy
+      beingVacancies.push({
+        r: dead.r,
+        theta: dead.theta,
+        type: dead.type,
+        arcSpan: dead.arcSpan,
+        timer: 3000 + entropy() * 5000,
+      });
+      beingPatterns.splice(i, 1);
+    }
+  }
 
-  const damping = 0.90 + (a.mass / 5) * 0.06;
-  a.vx = a.vx * damping + fx * (1 - damping);
-  a.vy = a.vy * damping + fy * (1 - damping);
-  a.x += a.vx;
-  a.y += a.vy;
+  // Maintain 5-8 beings (accounting for vacancies)
+  const targetBeings = 5 + Math.floor(field.energy * 3);
+  const totalPending = beingPatterns.length + beingVacancies.length;
+  while (totalPending < targetBeings && beingPatterns.length < targetBeings && spawnedThisFrame < 3) {
+    beingPatterns.push(spawnBeing());
+    spawnedThisFrame++;
+    break; // only spawn one fresh being per frame to avoid bulk spawning
+  }
+  while (beingPatterns.length > targetBeings + 2) beingPatterns.pop();
+}
 
-  const m = 60;
-  if (a.x < -m) a.x += W + m * 2;
-  if (a.x > W + m) a.x -= W + m * 2;
-  if (a.y < -m) a.y += H + m * 2;
-  if (a.y > H + m) a.y -= H + m * 2;
+// [Fix #36] Render all patterns (bg + beings) sorted by r ascending (inner first) for depth
+function renderAllPatterns() {
+  const all = [];
+  for (const p of bgPatterns) all.push(p);
+  for (const b of beingPatterns) all.push(b);
+  all.sort((a, b) => a.r - b.r);
+
+  for (const p of all) {
+    if (p.isBeing) {
+      renderBeing(p);
+    } else {
+      renderPattern(p);
+    }
+  }
 }
 
 // === BREATH ===
@@ -208,14 +792,16 @@ let breathTimer = 0;
 let breathAlpha = 0;
 let birthDur, livingDur, dyingDur, silenceDur;
 
-function easeInOut(t) { return t < 0.5 ? 2*t*t : -1+(4-2*t)*t; }
+function easeInOut(t) { return t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t; }
 
 function beginLife() {
   const ls = 0.3 + abundance * 1.4;
   const ss = 0.3 + (1 - abundance) * 2;
   birthDur = (2000 + entropy() * 3000) * ls;
-  livingDur = (3000 + entropy() * 30000) * ls;
-  dyingDur = (2000 + entropy() * 4000) * ls;
+  livingDur = (5000 + entropy() * 30000) * ls;
+  // [Fix #35] livingDur floor: Math.max(8000, livingDur)
+  livingDur = Math.max(8000, livingDur);
+  dyingDur = (3000 + entropy() * 5000) * ls;
   silenceDur = (500 + entropy() * 8000) * ss;
   breathState = BREATH.BIRTH;
   breathTimer = 0;
@@ -238,15 +824,24 @@ function updateBreath(dt) {
         fieldTarget.order = Math.max(0, Math.min(1, fieldTarget.order));
       }
       break;
-    case BREATH.DYING:
-      breathAlpha = 1 - easeInOut(Math.min(breathTimer / dyingDur, 1));
+    case BREATH.DYING: {
+      const progress = Math.min(breathTimer / dyingDur, 1);
+      // [Fix #29] Final 5%: snap alpha to 0 instantly
+      if (progress > 0.95) {
+        breathAlpha = 0;
+      } else {
+        breathAlpha = 1 - easeInOut(progress);
+      }
       if (breathTimer >= dyingDur) {
-        stampTrace();
-        harvestKarma();
         checkTrueEmptiness();
-        breathState = BREATH.SILENCE; breathTimer = 0;
+        breathState = BREATH.SILENCE;
+        breathTimer = 0;
+        // [Fix #37] Clean up patterns when entering SILENCE
+        bgPatterns.length = 0;
+        // Beings that are still alive get to keep dying but new ones won't spawn
       }
       break;
+    }
     case BREATH.SILENCE:
       breathAlpha = 0;
       if (breathTimer >= silenceDur) {
@@ -257,29 +852,27 @@ function updateBreath(dt) {
   }
 }
 
-// === KARMA ===
-function harvestKarma() {
-  // karma is implicit — current field position IS the karma
-  // chooseNextTarget() reads field.energy and field.order
-}
-
 // === TRACES ===
-function stampTrace() {
-  traceCtx.globalAlpha = 0.2;
-  traceCtx.drawImage(mainCanvas, 0, 0);
-  traceCtx.globalAlpha = 1.0;
-}
-function fadeTrace() {
+let traceFadeTimer = 0;
+function fadeTrace(dt) {
+  traceFadeTimer += dt;
+  if (traceFadeTimer < 400) return; // ~2.5 times per second
+  traceFadeTimer = 0;
+  traceCtx.save();
+  traceCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
   traceCtx.globalCompositeOperation = 'destination-out';
-  traceCtx.fillStyle = 'rgba(0,0,0,0.008)';
+  // [Fix #31] Trace fade rate: rgba(0,0,0,0.04)
+  traceCtx.fillStyle = 'rgba(0,0,0,0.04)';
   traceCtx.fillRect(0, 0, W, H);
   traceCtx.globalCompositeOperation = 'source-over';
+  traceCtx.restore();
 }
 
 // === EMPTINESS ===
 let isTrueEmptiness = false;
 function checkTrueEmptiness() {
-  isTrueEmptiness = entropy() < 0.15;
+  // [Fix #30] True emptiness probability: 6%
+  isTrueEmptiness = entropy() < 0.06;
   if (isTrueEmptiness) {
     silenceDur = 15000 + entropy() * 90000;
     traceCanvas.style.opacity = '0';
@@ -288,10 +881,23 @@ function checkTrueEmptiness() {
 
 // === BUDDHA-NATURE ===
 let bnVisible = true, bnTimer = 0, bnVanishDur = 0;
-const bnX = innerWidth * (0.15 + Math.random() * 0.7);
-const bnY = innerHeight * (0.15 + Math.random() * 0.7);
+// [Fix #32] Position near center using entropy
+const bnX = (() => { const e = entropy; return 0; })(); // placeholder, set after CX known
+const bnY = 0;
+const BN_SIZE = 3;
+let bnPosInitialized = false;
+let bnRealX, bnRealY;
+
+function initBNPos() {
+  if (bnPosInitialized) return;
+  bnPosInitialized = true;
+  // [Fix #32] Near center using entropy
+  bnRealX = CX + (entropy() - 0.5) * R * 0.3;
+  bnRealY = CY + (entropy() - 0.5) * R * 0.3;
+}
 
 function updateBN(dt) {
+  initBNPos();
   bnTimer += dt;
   if (!bnVisible) {
     bnVanishDur -= dt;
@@ -303,80 +909,56 @@ function updateBN(dt) {
 }
 
 function drawBN() {
-  if (!bnVisible || (isTrueEmptiness && breathState === BREATH.SILENCE)) return;
-  const a = 0.06 + Math.sin(performance.now() * 0.001) * 0.03;
-  ctx.fillStyle = `rgba(200,200,210,${a})`;
-  ctx.fillRect(bnX, bnY, 1, 1);
-}
+  initBNPos();
 
-// === COLOR ===
-function fieldToHue() {
-  const w = derived.warmth;
-  let h = 220 - w * 205;
-  if (w > 0.8 && field.energy > 0.5 && field.energy < 0.7 && field.order > 0.7) {
-    const goldBlend = (w - 0.8) * 5 * (1 - Math.abs(field.energy - 0.6) * 5) * (field.order - 0.7) * 3.3;
-    h = h + (45 - h) * Math.min(goldBlend, 1);
-  }
-  return h;
-}
-function fieldToSat() { return 15 + field.energy * 45; }
-function fieldToLight() { return 35 + field.energy * 25; }
-
-// === RENDER ===
-function renderAgents() {
-  const hue = fieldToHue();
-  const sat = fieldToSat();
-  const light = fieldToLight();
-
-  for (const a of agents) {
-    if (!a.alive || a.alpha < 0.01) continue;
-    const finalAlpha = a.alpha * breathAlpha;
-    if (finalAlpha < 0.005) continue;
-
-    const r = (a.mass * 0.8 + a.mass * field.energy * 0.5);
-    const aHue = hue + Math.sin(a.phase) * 8;
-
+  // [Fix #34] During true emptiness, buddha-nature starts glimmering in last 3s before void ends
+  if (isTrueEmptiness && breathState === BREATH.SILENCE) {
+    const timeLeft = silenceDur - breathTimer;
+    if (timeLeft > 3000) return; // hidden during most of true emptiness
+    // Glimmer in last 3s
+    const glimmerProgress = 1 - (timeLeft / 3000);
+    const a = 0.03 * glimmerProgress * (0.5 + Math.sin(performance.now() * 0.003) * 0.5);
+    if (a < 0.003) return;
+    ctx.fillStyle = hsl('gold', a);
     ctx.beginPath();
-    ctx.arc(a.x, a.y, r, 0, Math.PI * 2);
-    ctx.fillStyle = `hsla(${aHue}, ${sat}%, ${light}%, ${(0.4 + field.energy * 0.4) * finalAlpha})`;
+    ctx.arc(bnRealX, bnRealY, BN_SIZE, 0, Math.PI * 2);
     ctx.fill();
-
-    const v = Math.sqrt(a.vx * a.vx + a.vy * a.vy);
-    if (v > 0.5) {
-      const trailLen = Math.min(v * 4, 25);
-      ctx.beginPath();
-      ctx.moveTo(a.x, a.y);
-      ctx.lineTo(a.x - (a.vx / v) * trailLen, a.y - (a.vy / v) * trailLen);
-      ctx.strokeStyle = `hsla(${aHue}, ${sat * 0.7}%, ${light}%, ${Math.min(v * 0.1, 0.3) * finalAlpha})`;
-      ctx.lineWidth = r * 0.4;
-      ctx.lineCap = 'round';
-      ctx.stroke();
-    }
+    return;
   }
 
-  if (field.order > 0.3) {
-    const connAlpha = (field.order - 0.3) * 0.4;
-    for (let i = 0; i < agents.length; i++) {
-      if (agents[i].alpha < 0.3) continue;
-      for (let j = i + 1; j < agents.length; j++) {
-        if (agents[j].alpha < 0.3) continue;
-        const dx = agents[i].x - agents[j].x;
-        const dy = agents[i].y - agents[j].y;
-        const d = Math.sqrt(dx * dx + dy * dy);
-        if (d < 100) {
-          ctx.beginPath();
-          ctx.moveTo(agents[i].x, agents[i].y);
-          ctx.lineTo(agents[j].x, agents[j].y);
-          ctx.strokeStyle = `hsla(${hue}, ${sat * 0.5}%, ${light}%, ${connAlpha * (1 - d/100) * breathAlpha * Math.min(agents[i].alpha, agents[j].alpha)})`;
-          ctx.lineWidth = 0.5;
-          ctx.stroke();
-        }
-      }
+  if (!bnVisible) return;
+
+  // [Fix #33] Buddha-nature appears in last 2s of SILENCE (before anything else)
+  let bnAlpha = 0;
+  if (breathState === BREATH.SILENCE) {
+    const timeLeft = silenceDur - breathTimer;
+    if (timeLeft < 2000) {
+      bnAlpha = (2000 - timeLeft) / 2000; // fade in during last 2s of silence
+    } else {
+      return; // hidden during silence
     }
+  } else if (breathState === BREATH.BIRTH && breathTimer < 2000) {
+    bnAlpha = 0.5 + breathTimer / 4000; // already partially visible from silence transition
+  } else if (breathState === BREATH.DYING && breathTimer > dyingDur - 2000) {
+    // Last to vanish
+    bnAlpha = Math.max(0, (dyingDur - breathTimer) / 2000);
+  } else if (breathState === BREATH.DYING) {
+    bnAlpha = 1;
+  } else {
+    bnAlpha = 1;
   }
+
+  const pulseAlpha = 0.05 + Math.sin(performance.now() * 0.0008) * 0.035;
+  const a = pulseAlpha * bnAlpha;
+  if (a < 0.005) return;
+
+  ctx.fillStyle = hsl('gold', a);
+  ctx.beginPath();
+  ctx.arc(bnRealX, bnRealY, BN_SIZE, 0, Math.PI * 2);
+  ctx.fill();
 }
 
-// === LOOP ===
+// === MAIN LOOP ===
 beginLife();
 
 let lastTime = performance.now();
@@ -388,25 +970,35 @@ function loop(t) {
   lerpField(dt);
   updateBreath(dt);
   updateBN(dt);
+  updateCoreBreath(dt);
+  updateColorMaturity(dt);
 
+  // True emptiness — clear and draw only buddha-nature glimmer
   if (breathState === BREATH.SILENCE && isTrueEmptiness) {
+    ctx.save();
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, W, H);
+    drawBN(); // [Fix #34] glimmer during true emptiness
+    ctx.restore();
     requestAnimationFrame(loop);
     return;
   }
 
-  fadeTrace();
+  fadeTrace(dt);
+
+  ctx.save();
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, W, H);
 
   if (breathAlpha > 0.001) {
-    for (const a of agents) {
-      updateAgentLife(a, dt);
-      updateAgentPhysics(a, t, dt);
-    }
-    renderAgents();
+    managePatterns(dt);
+    manageBeings(dt);
+    // [Fix #36] Render all sorted by r
+    renderAllPatterns();
   }
 
   drawBN();
+  ctx.restore();
   requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);
