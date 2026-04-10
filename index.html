@@ -374,13 +374,11 @@ let beingVacancies = [];
 let spawnedThisFrame = 0;
 
 function spawnBgPattern(inheritRecord) {
-  const types = ['arc', 'spiral', 'ray', 'ring'];
-  // Weight by field state
+  // Only arc and spiral — ray/ring removed (too mechanical, breaks visual unity)
+  const types = ['arc', 'spiral'];
   const weights = [
-    1 + field.order * 2,
-    1 + field.energy * 2,
-    0.5 + field.energy * (1 - field.order),
-    0.5 + field.order,
+    1 + field.order * 2,   // arc: favored by order
+    1 + field.energy * 2,  // spiral: favored by energy
   ];
   const total = weights.reduce((a, b) => a + b, 0);
   let rv = entropy() * total;
@@ -421,8 +419,6 @@ function spawnBgPattern(inheritRecord) {
     // Type-specific params
     arcSpan: 0.2 + entropy() * 0.6,
     spiralTurns: 1 + entropy() * 2,
-    rayLength: R * (0.1 + entropy() * 0.3),
-    ringSpan: 0.3 + entropy() * 1.2,
     lineWidth: 0.5 + entropy() * 1.5,
     colorKey: entropy() > 0.5 ? fieldPrimaryColor() : fieldSecondaryColor(),
     // [Fix #11] rotSpeed and lineWidth scaled by distance
@@ -431,8 +427,8 @@ function spawnBgPattern(inheritRecord) {
     // [Fix #15] Birth animation: track target spans for grow-in effect
     birthArcSpan: 0,
     targetArcSpan: 0.2 + entropy() * 0.6,
-    birthRingSpan: 0,
-    targetRingSpan: 0.3 + entropy() * 1.2,
+    // Child arcs: 0-2 nested inner arcs that give organic structure
+    children: [],
   };
 }
 
@@ -448,11 +444,22 @@ function updatePatternLife(p, dt) {
   const fadeTime = 1500;
   if (p.age < fadeTime) {
     p.alpha = p.age / fadeTime;
-    // [Fix #15] Birth animation: grow arc/ring spans during fadeIn
+    // Birth animation: grow arc span during fadeIn ("drawing" effect)
     if (p.type === 'arc') {
       p.arcSpan = p.targetArcSpan * (p.age / fadeTime);
-    } else if (p.type === 'ring') {
-      p.ringSpan = p.targetRingSpan * (p.age / fadeTime);
+    }
+    // Sprout child arcs when birth is complete (arc type only)
+    if (p.type === 'arc' && p.children.length === 0 && entropy() < 0.4) {
+      const numChildren = 1 + Math.floor(entropy() * 2); // 1-2 children
+      for (let c = 0; c < numChildren; c++) {
+        const shrink = 0.7 - c * 0.15; // each child smaller
+        p.children.push({
+          r: p.r * shrink,
+          startAngle: p.theta - p.arcSpan * 0.4 + c * 0.08,
+          endAngle: p.theta + p.arcSpan * 0.4 - c * 0.08,
+          widthScale: 0.5 - c * 0.1,
+        });
+      }
     }
   } else if (p.age > p.maxLife - fadeTime) {
     p.alpha = Math.max(0, (p.maxLife - p.age) / fadeTime);
@@ -566,26 +573,13 @@ function renderPattern(p) {
       strokeThangka(pts, lw, color, a, embedColor);
       break;
     }
-    case 'ray': {
-      const x1 = CX + Math.cos(p.theta) * p.r;
-      const y1 = CY + Math.sin(p.theta) * p.r;
-      const endR = p.r + p.rayLength;
-      const x2 = CX + Math.cos(p.theta) * endR;
-      const y2 = CY + Math.sin(p.theta) * endR;
-      // Discretize ray into segments for breathing
-      const rayPts = [];
-      const raySegs = 8;
-      for (let i = 0; i <= raySegs; i++) {
-        const t = i / raySegs;
-        rayPts.push({ x: x1 + (x2-x1)*t, y: y1 + (y2-y1)*t });
-      }
-      strokeThangka(rayPts, lw, color, a, embedColor);
-      break;
-    }
-    case 'ring': {
-      const ringPts = arcToPoints(CX, CY, p.r, p.theta, p.theta + p.ringSpan);
-      strokeThangka(ringPts, lw, color, a, embedColor);
-      break;
+  }
+
+  // Render child arcs (nested inner structure)
+  if (p.children && p.children.length > 0) {
+    for (const child of p.children) {
+      const childPts = arcToPoints(CX, CY, child.r, child.startAngle, child.endAngle);
+      strokeThangka(childPts, lw * child.widthScale, color, a * 0.6, null);
     }
   }
 }
