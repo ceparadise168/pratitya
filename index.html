@@ -79,6 +79,47 @@ function randomizeFieldTarget() {
   fieldTarget.pulse = entropy();
 }
 
+// === ASPECT 佛相 ===
+const ASPECTS = {
+  wrath: {
+    energy: [0.8, 1.0], warmth: [0.7, 1.0], rotation: [0.5, 1.0],
+    flowX: [-0.5, 0.5], flowY: [-0.5, 0.5], cohesion: [0.3, 0.6], pulse: [0.6, 1.0],
+  },
+  compassion: {
+    energy: [0.15, 0.35], warmth: [0.55, 0.75], rotation: [-0.2, 0.2],
+    flowX: [-0.3, 0.3], flowY: [-0.3, 0.3], cohesion: [0.5, 0.7], pulse: [0.1, 0.3],
+  },
+  joy: {
+    energy: [0.5, 0.8], warmth: [0.4, 0.7], rotation: [-0.4, 0.4],
+    flowX: [-0.3, 0.5], flowY: [-0.8, -0.2], cohesion: [0.3, 0.6], pulse: [0.3, 0.7],
+  },
+  meditation: {
+    energy: [0.05, 0.2], warmth: [0.1, 0.3], rotation: [-0.1, 0.1],
+    flowX: [-0.05, 0.05], flowY: [-0.05, 0.05], cohesion: [0.7, 0.95], pulse: [0.0, 0.15],
+  },
+  silence: {
+    energy: [0.0, 0.05], warmth: [0.3, 0.5], rotation: [0, 0],
+    flowX: [0, 0], flowY: [0, 0], cohesion: [0.4, 0.6], pulse: [0.0, 0.05],
+  },
+};
+
+let currentAspect = 'compassion';
+
+function randRange(range) {
+  return range[0] + entropy() * (range[1] - range[0]);
+}
+
+function applyAspect(name) {
+  currentAspect = name;
+  const a = ASPECTS[name];
+  for (const k of Object.keys(a)) {
+    fieldTarget[k] = randRange(a[k]);
+  }
+}
+
+// Start with a random non-silence aspect
+applyAspect(['compassion', 'joy', 'meditation'][Math.floor(Math.random() * 3)]);
+
 // === AGENTS 眾生 ===
 const NUM_AGENTS = 200;
 const agents = [];
@@ -244,7 +285,6 @@ function loop(t) {
   requestAnimationFrame(loop);
 }
 
-setInterval(() => randomizeFieldTarget(), 6000);
 requestAnimationFrame(loop);
 </script>
 </body>
