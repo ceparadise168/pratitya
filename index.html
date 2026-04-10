@@ -7,10 +7,7 @@
 <style>
 *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 html, body { width: 100%; height: 100%; overflow: hidden; background: #000; cursor: none; }
-canvas {
-  position: fixed; top: 0; left: 0;
-  width: 100vw; height: 100vh;
-}
+canvas { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; }
 #trace { z-index: 0; }
 #main  { z-index: 1; }
 </style>
@@ -19,13 +16,12 @@ canvas {
 <canvas id="trace"></canvas>
 <canvas id="main"></canvas>
 <script>
-// === CANVAS SETUP ===
+// === CANVAS ===
 const mainCanvas = document.getElementById('main');
 const traceCanvas = document.getElementById('trace');
 const ctx = mainCanvas.getContext('2d');
 const traceCtx = traceCanvas.getContext('2d');
 let W, H;
-
 function resize() {
   W = mainCanvas.width = traceCanvas.width = innerWidth;
   H = mainCanvas.height = traceCanvas.height = innerHeight;
@@ -33,656 +29,390 @@ function resize() {
 resize();
 addEventListener('resize', resize);
 
-// === FIELD ===
-const field = {
-  energy: 0.5,
-  warmth: 0.5,
-  rotation: 0,
-  flowX: 0,
-  flowY: 0,
-  cohesion: 0.5,
-  pulse: 0,
-};
-
-const fieldTarget = {
-  energy: 0.5,
-  warmth: 0.5,
-  rotation: 0,
-  flowX: 0,
-  flowY: 0,
-  cohesion: 0.5,
-  pulse: 0,
-};
-
-function lerpField(dt) {
-  const keys = Object.keys(field);
-  for (const k of keys) {
-    field[k] += (fieldTarget[k] - field[k]) * 0.0005 * dt;
-  }
-}
-
-// Entropy source: mix performance.now() into every random decision
-// so no two moments in time can produce the same sequence (spec: 永不重複)
+// === ENTROPY ===
 function entropy() {
   const t = performance.now();
   const s = Math.sin(t * 12345.6789 + t * t * 0.001) * 0.5 + 0.5;
   return (Math.random() + s) % 1;
 }
 
-// === ASPECT 佛相 ===
-const ASPECTS = {
-  wrath: {
-    energy: [0.8, 1.0], warmth: [0.7, 1.0], rotation: [0.5, 1.0],
-    flowX: [-0.5, 0.5], flowY: [-0.5, 0.5], cohesion: [0.3, 0.6], pulse: [0.6, 1.0],
-  },
-  compassion: {
-    energy: [0.15, 0.35], warmth: [0.55, 0.75], rotation: [-0.2, 0.2],
-    flowX: [-0.3, 0.3], flowY: [-0.3, 0.3], cohesion: [0.5, 0.7], pulse: [0.1, 0.3],
-  },
-  joy: {
-    energy: [0.5, 0.8], warmth: [0.4, 0.7], rotation: [-0.4, 0.4],
-    flowX: [-0.3, 0.5], flowY: [-0.8, -0.2], cohesion: [0.3, 0.6], pulse: [0.3, 0.7],
-  },
-  meditation: {
-    energy: [0.05, 0.2], warmth: [0.1, 0.3], rotation: [-0.1, 0.1],
-    flowX: [-0.05, 0.05], flowY: [-0.05, 0.05], cohesion: [0.7, 0.95], pulse: [0.0, 0.15],
-  },
-  silence: {
-    energy: [0.0, 0.05], warmth: [0.3, 0.5], rotation: [0, 0],
-    flowX: [0, 0], flowY: [0, 0], cohesion: [0.4, 0.6], pulse: [0.0, 0.05],
-  },
-};
+// === FIELD ===
+const field = { energy: 0.3, order: 0.5 };
+const fieldTarget = { energy: 0.3, order: 0.5 };
+const derived = { warmth: 0.5, rotation: 0, flowX: 0, flowY: 0, pulse: 0 };
 
-let currentAspect = 'compassion';
-
-function randRange(range) {
-  return range[0] + entropy() * (range[1] - range[0]);
+function deriveParams() {
+  const e = field.energy, o = field.order;
+  derived.warmth = e * 0.6 + (1 - o) * 0.4;
+  derived.rotation = (entropy() > 0.5 ? 1 : -1) * e * (1 - Math.abs(o - 0.5) * 2) * 0.8;
+  const flowStrength = e * (1 - o) * 1.5;
+  derived.flowX = (entropy() - 0.5) * 2 * flowStrength;
+  derived.flowY = (entropy() - 0.5) * 2 * flowStrength;
+  derived.pulse = (1 - Math.abs(e - 0.5) * 2) * 0.6;
 }
 
-function applyAspect(name) {
-  currentAspect = name;
-  const a = ASPECTS[name];
-  for (const k of Object.keys(a)) {
-    fieldTarget[k] = randRange(a[k]);
+function lerpField(dt) {
+  const de = fieldTarget.energy - field.energy;
+  const dor = fieldTarget.order - field.order;
+  const dist = Math.sqrt(de * de + dor * dor);
+  const rate = (0.0003 + dist * dist * 0.005) * dt;
+  field.energy += de * rate;
+  field.order += dor * rate;
+}
+
+function chooseNextTarget() {
+  const isJump = entropy() < 0.3;
+  const range = isJump ? 0.8 : 0.3;
+  let ne = field.energy + (entropy() - 0.5) * 2 * range;
+  let no = field.order + (entropy() - 0.5) * 2 * range;
+  ne = Math.max(0, Math.min(1, ne));
+  no = Math.max(0, Math.min(1, no));
+  if (Math.abs(ne - fieldTarget.energy) < 0.05 && Math.abs(no - fieldTarget.order) < 0.05) {
+    ne = entropy();
+    no = entropy();
+  }
+  fieldTarget.energy = ne;
+  fieldTarget.order = no;
+  deriveParams();
+}
+
+// === MACRO ===
+let abundance = 0.5;
+let abundanceTarget = entropy();
+let macroTimer = 0;
+let macroInterval = 60000 + entropy() * 120000;
+
+function updateMacro(dt) {
+  macroTimer += dt;
+  if (macroTimer > macroInterval) {
+    abundanceTarget = entropy();
+    macroTimer = 0;
+    macroInterval = 60000 + entropy() * 120000;
+  }
+  abundance += (abundanceTarget - abundance) * 0.00005 * dt;
+}
+
+// === AGENTS ===
+const NUM_AGENTS = 40;
+const agents = [];
+
+function spawnAgent() {
+  return {
+    x: W * (0.2 + entropy() * 0.6),
+    y: H * (0.2 + entropy() * 0.6),
+    vx: 0, vy: 0,
+    mass: 1 + entropy() * 4,
+    lifespan: 3000 + entropy() * 60000,
+    age: 0,
+    alpha: 0,
+    alive: true,
+    phase: entropy() * Math.PI * 2,
+  };
+}
+
+for (let i = 0; i < NUM_AGENTS; i++) {
+  const a = spawnAgent();
+  a.age = entropy() * a.lifespan * 0.5;
+  a.alpha = 1;
+  agents.push(a);
+}
+
+function updateAgentLife(a, dt) {
+  a.age += dt;
+  if (a.age < 2000) {
+    a.alpha = a.age / 2000;
+  } else if (a.age > a.lifespan - 2000) {
+    a.alpha = Math.max(0, (a.lifespan - a.age) / 2000);
+  } else {
+    a.alpha = 1;
+  }
+  if (a.age >= a.lifespan) {
+    const idx = agents.indexOf(a);
+    if (idx !== -1) agents[idx] = spawnAgent();
   }
 }
 
-// === BREATH 呼吸 ===
+function updateAgentPhysics(a, t, dt) {
+  const cx = W / 2, cy = H / 2;
+  const e = field.energy, o = field.order;
+  const speed = (0.3 + e * 3.0) / a.mass;
+  let fx = 0, fy = 0;
+
+  fx += derived.flowX * speed * 0.6;
+  fy += derived.flowY * speed * 0.6;
+
+  const dx = a.x - cx, dy = a.y - cy;
+  const dist = Math.sqrt(dx * dx + dy * dy) + 1;
+  fx += (-dy / dist) * derived.rotation * speed;
+  fy += (dx / dist) * derived.rotation * speed;
+
+  const cohForce = (o - 0.3) * 2;
+  fx += (-dx / dist) * cohForce * speed * 0.3;
+  fy += (-dy / dist) * cohForce * speed * 0.3;
+
+  const pulseWave = Math.sin(t * 0.004 * (0.5 + derived.pulse * 2));
+  fx += (dx / dist) * pulseWave * derived.pulse * speed * 0.4;
+  fy += (dy / dist) * pulseWave * derived.pulse * speed * 0.4;
+
+  if (o > 0.7 && e < 0.3) {
+    const mandalaStrength = (o - 0.7) * (0.3 - e) * 10;
+    const angle = Math.atan2(dy, dx);
+    const symmetry = 8;
+    const sector = (Math.PI * 2) / symmetry;
+    const snapped = Math.round(angle / sector) * sector;
+    const ringDist = 40 + (agents.indexOf(a) % 5) * 45;
+    const tx = cx + Math.cos(snapped) * ringDist;
+    const ty = cy + Math.sin(snapped) * ringDist;
+    fx += (tx - a.x) * mandalaStrength * 0.008;
+    fy += (ty - a.y) * mandalaStrength * 0.008;
+  }
+
+  if (o > 0.4 && e < 0.6) {
+    for (let j = 0; j < agents.length; j++) {
+      const b = agents[j];
+      if (b === a || !b.alive) continue;
+      const bx = b.x - a.x, by = b.y - a.y;
+      const bd = Math.sqrt(bx * bx + by * by);
+      if (bd < 80 && bd > 15) {
+        fx += (bx / bd) * 0.05 * o;
+        fy += (by / bd) * 0.05 * o;
+      }
+      if (bd < 15) {
+        fx -= (bx / bd) * 0.2;
+        fy -= (by / bd) * 0.2;
+      }
+    }
+  }
+
+  a.phase += 0.01 + e * 0.02;
+  fx += Math.sin(a.phase) * 0.15;
+  fy += Math.cos(a.phase * 1.3) * 0.15;
+
+  const damping = 0.90 + (a.mass / 5) * 0.06;
+  a.vx = a.vx * damping + fx * (1 - damping);
+  a.vy = a.vy * damping + fy * (1 - damping);
+  a.x += a.vx;
+  a.y += a.vy;
+
+  const m = 60;
+  if (a.x < -m) a.x += W + m * 2;
+  if (a.x > W + m) a.x -= W + m * 2;
+  if (a.y < -m) a.y += H + m * 2;
+  if (a.y > H + m) a.y -= H + m * 2;
+}
+
+// === BREATH ===
 const BREATH = { BIRTH: 0, LIVING: 1, DYING: 2, SILENCE: 3 };
 let breathState = BREATH.BIRTH;
 let breathTimer = 0;
-let breathAlpha = 0; // global alpha multiplier for all visuals
-let isTrueEmptiness = false;
+let breathAlpha = 0;
+let birthDur, livingDur, dyingDur, silenceDur;
 
-let birthDur = 3000;
-let livingDur = 8000;
-let dyingDur = 3000;
-let silenceDur = 2000;
-
-function easeInOut(t) {
-  return t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
-}
+function easeInOut(t) { return t < 0.5 ? 2*t*t : -1+(4-2*t)*t; }
 
 function beginLife() {
-  const lifeScale = 0.3 + abundance * 1.4;
-  const silenceScale = 0.3 + (1 - abundance) * 2;
-
-  birthDur = (2000 + entropy() * 3000) * lifeScale;
-  livingDur = (3000 + entropy() * 20000) * lifeScale;
-  dyingDur = (2000 + entropy() * 4000) * lifeScale;
-  silenceDur = (1000 + entropy() * 5000) * silenceScale;
-
+  const ls = 0.3 + abundance * 1.4;
+  const ss = 0.3 + (1 - abundance) * 2;
+  birthDur = (2000 + entropy() * 3000) * ls;
+  livingDur = (3000 + entropy() * 30000) * ls;
+  dyingDur = (2000 + entropy() * 4000) * ls;
+  silenceDur = (500 + entropy() * 8000) * ss;
   breathState = BREATH.BIRTH;
   breathTimer = 0;
-
-  const nextAspect = karmaChooseAspect();
-  applyAspect(nextAspect);
-
-  driftBuddhaNature();
+  chooseNextTarget();
 }
 
 function updateBreath(dt) {
   breathTimer += dt;
-
   switch (breathState) {
     case BREATH.BIRTH:
       breathAlpha = easeInOut(Math.min(breathTimer / birthDur, 1));
-      if (breathTimer >= birthDur) {
-        breathState = BREATH.LIVING;
-        breathTimer = 0;
-      }
+      if (breathTimer >= birthDur) { breathState = BREATH.LIVING; breathTimer = 0; }
       break;
-
     case BREATH.LIVING:
       breathAlpha = 1;
       if (breathTimer >= livingDur) {
-        breathState = BREATH.DYING;
-        breathTimer = 0;
-        // Push field toward silence ONCE at transition, not every frame
-        applyAspect('silence');
+        breathState = BREATH.DYING; breathTimer = 0;
+        fieldTarget.energy = entropy() * 0.1;
+        fieldTarget.order = field.order + (entropy() - 0.5) * 0.3;
+        fieldTarget.order = Math.max(0, Math.min(1, fieldTarget.order));
       }
       break;
-
     case BREATH.DYING:
       breathAlpha = 1 - easeInOut(Math.min(breathTimer / dyingDur, 1));
       if (breathTimer >= dyingDur) {
         stampTrace();
         harvestKarma();
-        isTrueEmptiness = entropy() < 0.15;
-        if (isTrueEmptiness) {
-          silenceDur = 15000 + entropy() * 90000;
-          traceCanvas.style.opacity = '0';
-        }
-        breathState = BREATH.SILENCE;
-        breathTimer = 0;
+        checkTrueEmptiness();
+        breathState = BREATH.SILENCE; breathTimer = 0;
       }
       break;
-
     case BREATH.SILENCE:
       breathAlpha = 0;
       if (breathTimer >= silenceDur) {
-        if (isTrueEmptiness) {
-          traceCanvas.style.opacity = '1';
-          isTrueEmptiness = false;
-        }
+        if (isTrueEmptiness) { traceCanvas.style.opacity = '1'; isTrueEmptiness = false; }
         beginLife();
       }
       break;
   }
 }
 
-// === KARMA 因緣 ===
-let karma = {
-  energy: 0.5,
-  warmth: 0.5,
-  rotation: 0,
-  cohesion: 0.5,
-};
-
+// === KARMA ===
 function harvestKarma() {
-  karma.energy = field.energy;
-  karma.warmth = field.warmth;
-  karma.rotation = field.rotation;
-  karma.cohesion = field.cohesion;
+  // karma is implicit — current field position IS the karma
+  // chooseNextTarget() reads field.energy and field.order
 }
 
-function karmaChooseAspect() {
-  const weights = {
-    wrath: 0.3 + karma.energy * 3 + karma.warmth * 1.5,
-    compassion: 0.5 + (1 - karma.energy) * 1.5 + karma.warmth * 1,
-    joy: 0.5 + karma.energy * 1.5 + (1 - Math.abs(karma.rotation)) * 0.5,
-    meditation: 0.3 + (1 - karma.energy) * 2 + karma.cohesion * 2,
-  };
-
-  const entries = Object.entries(weights);
-  const jittered = entries.map(([name, w]) => [name, w * (0.3 + entropy() * 1.4)]);
-  const total = jittered.reduce((sum, [, w]) => sum + w, 0);
-  let r = entropy() * total;
-  for (const [name, w] of jittered) {
-    r -= w;
-    if (r <= 0) return name;
-  }
-  return jittered[0][0];
-}
-
-// === MACRO 劫 ===
-let abundance = 0.5;
-let abundanceTarget = entropy();
-let abundanceShiftTimer = 0;
-let abundanceShiftInterval = 60000 + entropy() * 120000;
-
-function updateMacro(dt) {
-  abundanceShiftTimer += dt;
-  if (abundanceShiftTimer > abundanceShiftInterval) {
-    abundanceTarget = entropy();
-    abundanceShiftTimer = 0;
-    abundanceShiftInterval = 60000 + entropy() * 120000;
-  }
-  abundance += (abundanceTarget - abundance) * 0.00005 * dt;
-}
-
-// === AGENTS 眾生 ===
-const NUM_AGENTS = 200;
-const agents = [];
-for (let i = 0; i < NUM_AGENTS; i++) {
-  agents.push({
-    x: Math.random() * innerWidth,
-    y: Math.random() * innerHeight,
-    vx: 0,
-    vy: 0,
-    size: 1 + Math.random() * 2,
-    phase: Math.random() * Math.PI * 2,
-  });
-}
-
-// === AGENT BEHAVIOR ===
-function updateAgents(t, dt) {
-  const activeCount = Math.floor(NUM_AGENTS * (0.3 + abundance * 0.7));
-  const cx = W / 2, cy = H / 2;
-  const speed = 0.3 + field.energy * 2.5;
-  const pulseWave = Math.sin(t * 0.003 * (0.5 + field.pulse * 2));
-
-  for (let i = 0; i < activeCount; i++) {
-    const a = agents[i];
-    let fx = 0, fy = 0;
-
-    // Flow
-    fx += field.flowX * speed * 0.5;
-    fy += field.flowY * speed * 0.5;
-
-    // Rotation around center
-    const dx = a.x - cx, dy = a.y - cy;
-    const dist = Math.sqrt(dx * dx + dy * dy) + 1;
-    fx += (-dy / dist) * field.rotation * speed * 0.8;
-    fy += (dx / dist) * field.rotation * speed * 0.8;
-
-    // Cohesion (toward/away from center)
-    const cohesionForce = (field.cohesion - 0.5) * 2;
-    fx += (-dx / dist) * cohesionForce * speed * 0.3;
-    fy += (-dy / dist) * cohesionForce * speed * 0.3;
-
-    // Pulse (radial breathing)
-    fx += (dx / dist) * pulseWave * field.pulse * speed * 0.4;
-    fy += (dy / dist) * pulseWave * field.pulse * speed * 0.4;
-
-    // Flocking: separation + alignment (sample every 3rd for perf)
-    let sepX = 0, sepY = 0, alignX = 0, alignY = 0, nearCount = 0;
-    for (let j = 0; j < activeCount; j += 3) {
-      const b = agents[j];
-      if (b === a) continue;
-      const bx = b.x - a.x, by = b.y - a.y;
-      const bd = Math.sqrt(bx * bx + by * by);
-      if (bd < 50) {
-        nearCount++;
-        if (bd < 20) { sepX -= bx / bd; sepY -= by / bd; }
-        alignX += b.vx; alignY += b.vy;
-      }
-    }
-    if (nearCount > 0) {
-      fx += sepX * 0.3;
-      fy += sepY * 0.3;
-      fx += (alignX / nearCount - a.vx) * 0.05;
-      fy += (alignY / nearCount - a.vy) * 0.05;
-    }
-
-    // Individual wander
-    a.phase += 0.01 + field.energy * 0.02;
-    fx += Math.sin(a.phase) * 0.2;
-    fy += Math.cos(a.phase * 1.3) * 0.2;
-
-    // Thangka forces
-    applyAureoleForceToAgent(a);
-    applyMandalaForceToAgent(a, i);
-
-    // Apply forces
-    a.vx = a.vx * 0.95 + fx * 0.05;
-    a.vy = a.vy * 0.95 + fy * 0.05;
-    a.x += a.vx;
-    a.y += a.vy;
-
-    // Wrap edges
-    const margin = 50;
-    if (a.x < -margin) a.x += W + margin * 2;
-    if (a.x > W + margin) a.x -= W + margin * 2;
-    if (a.y < -margin) a.y += H + margin * 2;
-    if (a.y > H + margin) a.y -= H + margin * 2;
-  }
-}
-
-// === COLOR 色 ===
-function fieldToHue() {
-  // warmth 0 → hue 220 (cold blue), warmth 1 → hue 15 (warm red)
-  return 220 - field.warmth * 205;
-}
-
-function fieldToSaturation() {
-  // energy drives saturation: low energy → desaturated, high → vivid
-  return 15 + field.energy * 45;
-}
-
-function fieldToLightness() {
-  return 35 + field.energy * 25;
-}
-
-// === TRACES 痕跡 ===
+// === TRACES ===
 function stampTrace() {
-  traceCtx.globalAlpha = 0.15;
+  traceCtx.globalAlpha = 0.2;
   traceCtx.drawImage(mainCanvas, 0, 0);
   traceCtx.globalAlpha = 1.0;
 }
-
 function fadeTrace() {
   traceCtx.globalCompositeOperation = 'destination-out';
-  traceCtx.fillStyle = 'rgba(0, 0, 0, 0.008)';
+  traceCtx.fillStyle = 'rgba(0,0,0,0.008)';
   traceCtx.fillRect(0, 0, W, H);
   traceCtx.globalCompositeOperation = 'source-over';
 }
 
-// === THANGKA 唐卡 ===
-
-// --- Aureole 背光 ---
-let aureoleActive = false;
-let aureoleTimer = 0;
-let aureoleCx = 0, aureoleCy = 0;
-const AUREOLE_DURATION = 4000;
-const AUREOLE_ENERGY_THRESHOLD = 0.85;
-let aureoleCooldown = 0;
-
-function checkAureole(dt) {
-  aureoleCooldown -= dt;
-  if (!aureoleActive && field.energy > AUREOLE_ENERGY_THRESHOLD && aureoleCooldown <= 0) {
-    aureoleActive = true;
-    aureoleTimer = 0;
-    let sumX = 0, sumY = 0;
-    for (const a of agents) { sumX += a.x; sumY += a.y; }
-    aureoleCx = sumX / agents.length;
-    aureoleCy = sumY / agents.length;
-    aureoleCooldown = 20000 + entropy() * 30000;
-  }
-  if (aureoleActive) {
-    aureoleTimer += dt;
-    if (aureoleTimer > AUREOLE_DURATION) aureoleActive = false;
+// === EMPTINESS ===
+let isTrueEmptiness = false;
+function checkTrueEmptiness() {
+  isTrueEmptiness = entropy() < 0.15;
+  if (isTrueEmptiness) {
+    silenceDur = 15000 + entropy() * 90000;
+    traceCanvas.style.opacity = '0';
   }
 }
 
-function applyAureoleForceToAgent(a) {
-  if (!aureoleActive) return;
-  const progress = aureoleTimer / AUREOLE_DURATION;
-  if (progress > 0.5) return;
-  const strength = easeInOut(progress * 2) * 0.15;
-  const dx = a.x - aureoleCx, dy = a.y - aureoleCy;
-  const dist = Math.sqrt(dx * dx + dy * dy) + 1;
-  const angle = Math.atan2(dy, dx);
-  const targetDist = 50 + (Math.abs(Math.sin(angle * 6)) * 150);
-  const forceMag = (targetDist - dist) * strength * 0.01;
-  a.vx += Math.cos(angle) * forceMag;
-  a.vy += Math.sin(angle) * forceMag;
+// === BUDDHA-NATURE ===
+let bnVisible = true, bnTimer = 0, bnVanishDur = 0;
+const bnX = innerWidth * (0.15 + Math.random() * 0.7);
+const bnY = innerHeight * (0.15 + Math.random() * 0.7);
+
+function updateBN(dt) {
+  bnTimer += dt;
+  if (!bnVisible) {
+    bnVanishDur -= dt;
+    if (bnVanishDur <= 0) bnVisible = true;
+  } else if (bnTimer > 30000) {
+    bnTimer = 0;
+    if (entropy() < 0.05) { bnVisible = false; bnVanishDur = 30000 + entropy() * 90000; }
+  }
 }
 
-function drawAureoleGlow() {
-  if (!aureoleActive) return;
-  const progress = aureoleTimer / AUREOLE_DURATION;
-  const alpha = Math.sin(progress * Math.PI) * 0.08 * breathAlpha;
-  if (alpha < 0.001) return;
+function drawBN() {
+  if (!bnVisible || (isTrueEmptiness && breathState === BREATH.SILENCE)) return;
+  const a = 0.06 + Math.sin(performance.now() * 0.001) * 0.03;
+  ctx.fillStyle = `rgba(200,200,210,${a})`;
+  ctx.fillRect(bnX, bnY, 1, 1);
+}
+
+// === COLOR ===
+function fieldToHue() {
+  const w = derived.warmth;
+  let h = 220 - w * 205;
+  if (w > 0.8 && field.energy > 0.5 && field.energy < 0.7 && field.order > 0.7) {
+    const goldBlend = (w - 0.8) * 5 * (1 - Math.abs(field.energy - 0.6) * 5) * (field.order - 0.7) * 3.3;
+    h = h + (45 - h) * Math.min(goldBlend, 1);
+  }
+  return h;
+}
+function fieldToSat() { return 15 + field.energy * 45; }
+function fieldToLight() { return 35 + field.energy * 25; }
+
+// === RENDER ===
+function renderAgents() {
   const hue = fieldToHue();
-  const grad = ctx.createRadialGradient(aureoleCx, aureoleCy, 0, aureoleCx, aureoleCy, 200);
-  grad.addColorStop(0, `hsla(${hue}, 40%, 60%, ${alpha})`);
-  grad.addColorStop(1, `hsla(${hue}, 40%, 60%, 0)`);
-  ctx.fillStyle = grad;
-  ctx.beginPath();
-  ctx.arc(aureoleCx, aureoleCy, 200, 0, Math.PI * 2);
-  ctx.fill();
-}
+  const sat = fieldToSat();
+  const light = fieldToLight();
 
-// --- Mandala 曼陀羅 ---
-let mandalaActive = false;
-let mandalaTimer = 0;
-const MANDALA_DURATION = 6000;
-let mandalaCooldown = 0;
+  for (const a of agents) {
+    if (!a.alive || a.alpha < 0.01) continue;
+    const finalAlpha = a.alpha * breathAlpha;
+    if (finalAlpha < 0.005) continue;
 
-function checkMandala(dt) {
-  mandalaCooldown -= dt;
-  if (!mandalaActive && currentAspect === 'meditation' && field.cohesion > 0.8 && field.energy < 0.2 && mandalaCooldown <= 0) {
-    mandalaActive = true;
-    mandalaTimer = 0;
-    mandalaCooldown = 30000 + entropy() * 60000;
-  }
-  if (mandalaActive) {
-    mandalaTimer += dt;
-    if (mandalaTimer > MANDALA_DURATION || currentAspect !== 'meditation') mandalaActive = false;
-  }
-}
+    const r = (a.mass * 0.8 + a.mass * field.energy * 0.5);
+    const aHue = hue + Math.sin(a.phase) * 8;
 
-function applyMandalaForceToAgent(a, agentIndex) {
-  if (!mandalaActive) return;
-  const progress = mandalaTimer / MANDALA_DURATION;
-  let strength;
-  if (progress < 0.4) strength = easeInOut(progress / 0.4) * 0.2;
-  else if (progress < 0.7) strength = 0.2;
-  else strength = 0.2 * (1 - easeInOut((progress - 0.7) / 0.3));
-  const cx = W / 2, cy = H / 2;
-  const foldSymmetry = 8;
-  const dx = a.x - cx, dy = a.y - cy;
-  const angle = Math.atan2(dy, dx);
-  const sectorAngle = (Math.PI * 2) / foldSymmetry;
-  const snappedAngle = Math.round(angle / sectorAngle) * sectorAngle;
-  const ringIndex = Math.floor(agentIndex / (agents.length / 5));
-  const targetDist = 40 + ringIndex * 50;
-  const targetX = cx + Math.cos(snappedAngle) * targetDist;
-  const targetY = cy + Math.sin(snappedAngle) * targetDist;
-  a.vx += (targetX - a.x) * strength * 0.01;
-  a.vy += (targetY - a.y) * strength * 0.01;
-}
-
-// --- Flame Motif 火焰紋 ---
-function drawFlameTrails() {
-  if (currentAspect !== 'wrath' || field.energy < 0.7) return;
-  const intensity = (field.energy - 0.7) / 0.3;
-  const hue = fieldToHue();
-  for (let i = 0; i < agents.length; i += 2) {
-    const a = agents[i];
-    const v = Math.sqrt(a.vx * a.vx + a.vy * a.vy);
-    if (v < 1.5) continue;
-    const len = v * 6 * intensity;
-    const baseAngle = Math.atan2(a.vy, a.vx) + Math.PI;
-    ctx.save();
-    ctx.translate(a.x, a.y);
     ctx.beginPath();
-    ctx.moveTo(0, 0);
-    for (let s = 1; s <= 6; s++) {
-      const t = s / 6;
-      const curl = Math.sin(t * Math.PI * 2 + performance.now() * 0.005 + a.phase) * 15 * t;
-      const upBias = -t * 20 * intensity;
-      ctx.lineTo(Math.cos(baseAngle) * len * t + curl, Math.sin(baseAngle) * len * t + upBias);
-    }
-    ctx.strokeStyle = `hsla(${hue + 10}, ${50 + intensity * 30}%, ${50 + intensity * 15}%, ${intensity * breathAlpha * 0.4})`;
-    ctx.lineWidth = 1.5 + intensity;
-    ctx.lineCap = 'round';
-    ctx.stroke();
-    if (v > 2.5) {
+    ctx.arc(a.x, a.y, r, 0, Math.PI * 2);
+    ctx.fillStyle = `hsla(${aHue}, ${sat}%, ${light}%, ${(0.4 + field.energy * 0.4) * finalAlpha})`;
+    ctx.fill();
+
+    const v = Math.sqrt(a.vx * a.vx + a.vy * a.vy);
+    if (v > 0.5) {
+      const trailLen = Math.min(v * 4, 25);
       ctx.beginPath();
-      const forkAngle = baseAngle + (Math.sin(a.phase * 7.3) > 0 ? 0.5 : -0.5);
-      const fx = Math.cos(baseAngle) * len * 0.4;
-      const fy = Math.sin(baseAngle) * len * 0.4;
-      ctx.moveTo(fx, fy);
-      for (let s = 1; s <= 3; s++) {
-        const t = s / 3;
-        ctx.lineTo(fx + Math.cos(forkAngle) * len * 0.4 * t, fy + Math.sin(forkAngle) * len * 0.4 * t - t * 12);
-      }
-      ctx.strokeStyle = `hsla(${hue + 20}, ${40 + intensity * 20}%, ${55 + intensity * 10}%, ${intensity * breathAlpha * 0.25})`;
-      ctx.lineWidth = 1;
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(a.x - (a.vx / v) * trailLen, a.y - (a.vy / v) * trailLen);
+      ctx.strokeStyle = `hsla(${aHue}, ${sat * 0.7}%, ${light}%, ${Math.min(v * 0.1, 0.3) * finalAlpha})`;
+      ctx.lineWidth = r * 0.4;
+      ctx.lineCap = 'round';
       ctx.stroke();
     }
-    ctx.restore();
   }
-}
 
-// --- Gold Event 金 ---
-let goldActive = false;
-let goldTimer = 0;
-const GOLD_DURATION = 3000;
-let goldCooldown = 60000;
-
-function checkGold(dt) {
-  goldCooldown -= dt;
-  if (!goldActive && goldCooldown <= 0) {
-    const alignment = (1 - Math.abs(field.energy - 0.6)) * field.warmth * field.cohesion * (1 - Math.abs(field.rotation));
-    if (alignment > 0.3 && entropy() < 0.00003) {
-      goldActive = true;
-      goldTimer = 0;
-      goldCooldown = 180000 + entropy() * 180000;
+  if (field.order > 0.3) {
+    const connAlpha = (field.order - 0.3) * 0.4;
+    for (let i = 0; i < agents.length; i++) {
+      if (agents[i].alpha < 0.3) continue;
+      for (let j = i + 1; j < agents.length; j++) {
+        if (agents[j].alpha < 0.3) continue;
+        const dx = agents[i].x - agents[j].x;
+        const dy = agents[i].y - agents[j].y;
+        const d = Math.sqrt(dx * dx + dy * dy);
+        if (d < 100) {
+          ctx.beginPath();
+          ctx.moveTo(agents[i].x, agents[i].y);
+          ctx.lineTo(agents[j].x, agents[j].y);
+          ctx.strokeStyle = `hsla(${hue}, ${sat * 0.5}%, ${light}%, ${connAlpha * (1 - d/100) * breathAlpha * Math.min(agents[i].alpha, agents[j].alpha)})`;
+          ctx.lineWidth = 0.5;
+          ctx.stroke();
+        }
+      }
     }
   }
-  if (goldActive) {
-    goldTimer += dt;
-    if (goldTimer > GOLD_DURATION) goldActive = false;
-  }
 }
 
-function goldAlpha() {
-  if (!goldActive) return 0;
-  return Math.sin((goldTimer / GOLD_DURATION) * Math.PI);
-}
-
-// === BUDDHA-NATURE 佛性 ===
-let buddhaNatureVisible = true;
-let buddhaNatureX = 0, buddhaNatureY = 0;
-let buddhaNatureTargetX = 0, buddhaNatureTargetY = 0;
-let buddhaNatureTimer = 0;
-const BUDDHA_NATURE_VANISH_CHECK = 30000;
-let buddhaNatureVanishDur = 0;
-
-function initBuddhaNature() {
-  buddhaNatureX = W * (0.15 + entropy() * 0.7);
-  buddhaNatureY = H * (0.15 + entropy() * 0.7);
-  buddhaNatureTargetX = buddhaNatureX;
-  buddhaNatureTargetY = buddhaNatureY;
-}
-initBuddhaNature();
-
-// Start first life (after abundance and buddha-nature vars are declared)
+// === LOOP ===
 beginLife();
 
-addEventListener('resize', () => {
-  buddhaNatureX = Math.min(buddhaNatureX, W - 10);
-  buddhaNatureY = Math.min(buddhaNatureY, H - 10);
-  buddhaNatureTargetX = Math.min(buddhaNatureTargetX, W - 10);
-  buddhaNatureTargetY = Math.min(buddhaNatureTargetY, H - 10);
-});
-
-function driftBuddhaNature() {
-  buddhaNatureTargetX = W * (0.15 + entropy() * 0.7);
-  buddhaNatureTargetY = H * (0.15 + entropy() * 0.7);
-}
-
-function updateBuddhaNature(dt) {
-  buddhaNatureTimer += dt;
-  buddhaNatureX += (buddhaNatureTargetX - buddhaNatureX) * 0.00002 * dt;
-  buddhaNatureY += (buddhaNatureTargetY - buddhaNatureY) * 0.00002 * dt;
-
-  if (!buddhaNatureVisible) {
-    buddhaNatureVanishDur -= dt;
-    if (buddhaNatureVanishDur <= 0) buddhaNatureVisible = true;
-  } else if (buddhaNatureTimer > BUDDHA_NATURE_VANISH_CHECK) {
-    buddhaNatureTimer = 0;
-    if (entropy() < 0.05) {
-      buddhaNatureVisible = false;
-      buddhaNatureVanishDur = 30000 + entropy() * 90000;
-    }
-  }
-}
-
-function drawBuddhaNature() {
-  if (!buddhaNatureVisible) return;
-  if (isTrueEmptiness && breathState === BREATH.SILENCE) return;
-  const t = performance.now();
-  const alpha = 0.06 + Math.sin(t * 0.001) * 0.03;
-  ctx.fillStyle = `rgba(200, 200, 210, ${alpha})`;
-  ctx.fillRect(buddhaNatureX, buddhaNatureY, 1, 1);
-}
-
-// === MAIN LOOP ===
 let lastTime = performance.now();
-
 function loop(t) {
-  const dt = t - lastTime;
+  const dt = Math.min(t - lastTime, 50);
   lastTime = t;
 
   updateMacro(dt);
   lerpField(dt);
-  checkAureole(dt);
-  checkMandala(dt);
-  checkGold(dt);
   updateBreath(dt);
+  updateBN(dt);
 
-  // True emptiness: absolute void during rare silence
   if (breathState === BREATH.SILENCE && isTrueEmptiness) {
     ctx.clearRect(0, 0, W, H);
-    updateBuddhaNature(dt);
     requestAnimationFrame(loop);
     return;
   }
 
   fadeTrace();
-
   ctx.clearRect(0, 0, W, H);
 
   if (breathAlpha > 0.001) {
-    updateAgents(t, dt);
-    const activeCount = Math.floor(NUM_AGENTS * (0.3 + abundance * 0.7));
-
-    const hue = fieldToHue();
-    const sat = fieldToSaturation();
-    const light = fieldToLightness();
-
-    for (let i = 0; i < activeCount; i++) {
-      const a = agents[i];
-      const r = a.size * (0.8 + field.energy * 0.6);
-
-      const gAlpha = goldAlpha();
-      let drawHue = hue + a.phase * 3;
-      let drawSat = sat;
-      let drawLight = light;
-      if (gAlpha > 0) {
-        drawHue = drawHue + (45 - drawHue) * gAlpha;
-        drawSat = drawSat + (70 - drawSat) * gAlpha;
-        drawLight = drawLight + (60 - drawLight) * gAlpha;
-      }
-
-      ctx.beginPath();
-      ctx.arc(a.x, a.y, r, 0, Math.PI * 2);
-      ctx.fillStyle = `hsla(${drawHue}, ${drawSat}%, ${drawLight}%, ${(0.4 + field.energy * 0.4) * breathAlpha})`;
-      ctx.fill();
-
-      // Motion trail
-      const v = Math.sqrt(a.vx * a.vx + a.vy * a.vy);
-      if (v > 0.8) {
-        ctx.beginPath();
-        ctx.moveTo(a.x, a.y);
-        ctx.lineTo(a.x - a.vx * 3, a.y - a.vy * 3);
-        ctx.strokeStyle = `hsla(${hue}, ${sat}%, ${light}%, ${Math.min(v * 0.08, 0.25) * breathAlpha})`;
-        ctx.lineWidth = r * 0.5;
-        ctx.lineCap = 'round';
-        ctx.stroke();
-      }
+    for (const a of agents) {
+      updateAgentLife(a, dt);
+      updateAgentPhysics(a, t, dt);
     }
-
-    // Connection lines when cohesion > 0.4
-    if (field.cohesion > 0.4) {
-      const connAlpha = (field.cohesion - 0.4) * 0.25;
-      for (let i = 0; i < activeCount; i += 2) {
-        for (let j = i + 1; j < Math.min(i + 6, activeCount); j += 2) {
-          const dx = agents[i].x - agents[j].x;
-          const dy = agents[i].y - agents[j].y;
-          const d = Math.sqrt(dx * dx + dy * dy);
-          if (d < 60) {
-            ctx.beginPath();
-            ctx.moveTo(agents[i].x, agents[i].y);
-            ctx.lineTo(agents[j].x, agents[j].y);
-            ctx.strokeStyle = `hsla(${hue}, ${sat * 0.5}%, ${light}%, ${connAlpha * (1 - d / 60) * breathAlpha})`;
-            ctx.lineWidth = 0.4;
-            ctx.stroke();
-          }
-        }
-      }
-    }
-
-    drawFlameTrails();
-    drawAureoleGlow();
+    renderAgents();
   }
 
-  updateBuddhaNature(dt);
-  drawBuddhaNature();
-
+  drawBN();
   requestAnimationFrame(loop);
 }
-
 requestAnimationFrame(loop);
 
 document.addEventListener('click', () => {
-  if (!document.fullscreenElement) {
-    document.documentElement.requestFullscreen().catch(() => {});
-  }
+  if (!document.fullscreenElement) document.documentElement.requestFullscreen().catch(() => {});
 });
 </script>
 </body>
