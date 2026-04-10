@@ -172,14 +172,22 @@ function lerpField(dt) {
   }
 }
 
+// Entropy source: mix performance.now() into every random decision
+// so no two moments in time can produce the same sequence (spec: 永不重複)
+function entropy() {
+  const t = performance.now();
+  const s = Math.sin(t * 12345.6789 + t * t * 0.001) * 0.5 + 0.5;
+  return (Math.random() + s) % 1;
+}
+
 function randomizeFieldTarget() {
-  fieldTarget.energy = Math.random();
-  fieldTarget.warmth = Math.random();
-  fieldTarget.rotation = (Math.random() - 0.5) * 2;
-  fieldTarget.flowX = (Math.random() - 0.5) * 2;
-  fieldTarget.flowY = (Math.random() - 0.5) * 2;
-  fieldTarget.cohesion = Math.random();
-  fieldTarget.pulse = Math.random();
+  fieldTarget.energy = entropy();
+  fieldTarget.warmth = entropy();
+  fieldTarget.rotation = (entropy() - 0.5) * 2;
+  fieldTarget.flowX = (entropy() - 0.5) * 2;
+  fieldTarget.flowY = (entropy() - 0.5) * 2;
+  fieldTarget.cohesion = entropy();
+  fieldTarget.pulse = entropy();
 }
 ```
 
@@ -454,7 +462,7 @@ const ASPECTS = {
 let currentAspect = 'compassion';
 
 function randRange(range) {
-  return range[0] + Math.random() * (range[1] - range[0]);
+  return range[0] + entropy() * (range[1] - range[0]);
 }
 
 function applyAspect(name) {
@@ -556,13 +564,13 @@ function updateBreath(dt) {
       if (breathTimer >= livingDur) {
         breathState = BREATH.DYING;
         breathTimer = 0;
+        // Push field toward silence ONCE at transition, not every frame
+        applyAspect('silence');
       }
       break;
 
     case BREATH.DYING:
       breathAlpha = 1 - easeInOut(Math.min(breathTimer / dyingDur, 1));
-      // Push field toward silence during dying
-      applyAspect('silence');
       if (breathTimer >= dyingDur) {
         breathState = BREATH.SILENCE;
         breathTimer = 0;
@@ -572,6 +580,11 @@ function updateBreath(dt) {
     case BREATH.SILENCE:
       breathAlpha = 0;
       if (breathTimer >= silenceDur) {
+        // Restore trace canvas visibility if it was hidden during true emptiness
+        if (isTrueEmptiness) {
+          traceCanvas.style.opacity = '1';
+          isTrueEmptiness = false;
+        }
         beginLife();
       }
       break;
@@ -650,9 +663,9 @@ function karmaChooseAspect() {
 
   // Add randomness so it's never fully deterministic
   const entries = Object.entries(weights);
-  const jittered = entries.map(([name, w]) => [name, w * (0.3 + Math.random() * 1.4)]);
+  const jittered = entries.map(([name, w]) => [name, w * (0.3 + entropy() * 1.4)]);
   const total = jittered.reduce((sum, [, w]) => sum + w, 0);
-  let r = Math.random() * total;
+  let r = entropy() * total;
   for (const [name, w] of jittered) {
     r -= w;
     if (r <= 0) return name;
@@ -697,15 +710,17 @@ Add a slow-drifting abundance parameter that creates longer-scale patterns: rain
 ```javascript
 // === MACRO 劫 ===
 let abundance = 0.5; // 0 = drought, 1 = rain season
-let abundanceTarget = Math.random();
+let abundanceTarget = entropy();
 let abundanceShiftTimer = 0;
-const ABUNDANCE_SHIFT_INTERVAL = 60000 + Math.random() * 120000; // 1-3 minutes
+let abundanceShiftInterval = 60000 + entropy() * 120000; // 1-3 minutes, re-randomized each shift
 
 function updateMacro(dt) {
   abundanceShiftTimer += dt;
-  if (abundanceShiftTimer > ABUNDANCE_SHIFT_INTERVAL) {
-    abundanceTarget = Math.random();
+  if (abundanceShiftTimer > abundanceShiftInterval) {
+    abundanceTarget = entropy();
     abundanceShiftTimer = 0;
+    // Re-randomize the interval itself — the observer can never detect a fixed period
+    abundanceShiftInterval = 60000 + entropy() * 120000;
   }
   abundance += (abundanceTarget - abundance) * 0.00005 * dt;
 }
@@ -721,16 +736,19 @@ function beginLife() {
   const lifeScale = 0.3 + abundance * 1.4;  // 0.3x to 1.7x
   const silenceScale = 0.3 + (1 - abundance) * 2; // inverse
 
-  birthDur = (2000 + Math.random() * 3000) * lifeScale;
-  livingDur = (3000 + Math.random() * 20000) * lifeScale;
-  dyingDur = (2000 + Math.random() * 4000) * lifeScale;
-  silenceDur = (1000 + Math.random() * 5000) * silenceScale;
+  birthDur = (2000 + entropy() * 3000) * lifeScale;
+  livingDur = (3000 + entropy() * 20000) * lifeScale;
+  dyingDur = (2000 + entropy() * 4000) * lifeScale;
+  silenceDur = (1000 + entropy() * 5000) * silenceScale;
 
   breathState = BREATH.BIRTH;
   breathTimer = 0;
 
   const nextAspect = karmaChooseAspect();
   applyAspect(nextAspect);
+
+  // Buddha-nature drifts to a new position each life
+  driftBuddhaNature();
 }
 ```
 
@@ -776,9 +794,14 @@ function stampTrace() {
 }
 
 function fadeTrace() {
-  // Very slow fade — clears over ~3 life cycles
-  traceCtx.fillStyle = 'rgba(0, 0, 0, 0.003)';
+  // Slow fade — clears over ~3 life cycles.
+  // Note: Canvas 2D uses 8-bit channels. rgba alpha < ~0.004 (1/255) rounds to 0
+  // and the trace would never fade. Use 0.008 (~2/255) for reliable sub-pixel fade.
+  // For even more control, use destination-out compositing:
+  traceCtx.globalCompositeOperation = 'destination-out';
+  traceCtx.fillStyle = 'rgba(0, 0, 0, 0.008)';
   traceCtx.fillRect(0, 0, W, H);
+  traceCtx.globalCompositeOperation = 'source-over';
 }
 ```
 
@@ -814,11 +837,13 @@ Some silence phases are true emptiness — completely black, no trace rendering,
 let isTrueEmptiness = false;
 
 // In the DYING → SILENCE transition in updateBreath, after stampTrace():
-isTrueEmptiness = Math.random() < 0.15; // ~15% of silences are true emptiness
+isTrueEmptiness = entropy() < 0.15; // ~15% of silences are true emptiness
 if (isTrueEmptiness) {
-  silenceDur = 15000 + Math.random() * 90000; // 15s to 105s — uncomfortable
-  // Clear trace canvas entirely — true emptiness erases memory
-  traceCtx.clearRect(0, 0, W, H);
+  silenceDur = 15000 + entropy() * 90000; // 15s to 105s — uncomfortable
+  // HIDE the trace canvas (opacity 0), don't erase it.
+  // The void is the observer's experience, not the system's memory.
+  // Karma/traces persist underneath — they just aren't visible during true emptiness.
+  traceCanvas.style.opacity = '0';
 }
 ```
 
@@ -867,26 +892,51 @@ let buddhaNatureY = 0;
 let buddhaNatureTimer = 0;
 const BUDDHA_NATURE_VANISH_CHECK = 30000; // check every 30s
 
+let buddhaNatureTargetX = 0, buddhaNatureTargetY = 0;
+
 function initBuddhaNature() {
   // Position: somewhere in the frame, not center (too obvious)
-  buddhaNatureX = W * (0.15 + Math.random() * 0.7);
-  buddhaNatureY = H * (0.15 + Math.random() * 0.7);
+  buddhaNatureX = W * (0.15 + entropy() * 0.7);
+  buddhaNatureY = H * (0.15 + entropy() * 0.7);
+  buddhaNatureTargetX = buddhaNatureX;
+  buddhaNatureTargetY = buddhaNatureY;
 }
 initBuddhaNature();
 addEventListener('resize', () => {
   buddhaNatureX = Math.min(buddhaNatureX, W - 10);
   buddhaNatureY = Math.min(buddhaNatureY, H - 10);
+  buddhaNatureTargetX = Math.min(buddhaNatureTargetX, W - 10);
+  buddhaNatureTargetY = Math.min(buddhaNatureTargetY, H - 10);
 });
+
+function driftBuddhaNature() {
+  // Called at each silence→birth transition. The pixel slowly migrates
+  // so no observer can memorize its location.
+  buddhaNatureTargetX = W * (0.15 + entropy() * 0.7);
+  buddhaNatureTargetY = H * (0.15 + entropy() * 0.7);
+}
+
+let buddhaNatureVanishDur = 0; // how long it stays vanished
 
 function updateBuddhaNature(dt) {
   buddhaNatureTimer += dt;
-  if (buddhaNatureTimer > BUDDHA_NATURE_VANISH_CHECK) {
-    buddhaNatureTimer = 0;
-    // ~5% chance to vanish for one cycle, then reappear
-    if (buddhaNatureVisible && Math.random() < 0.05) {
-      buddhaNatureVisible = false;
-    } else {
+
+  // Slow drift toward target position
+  buddhaNatureX += (buddhaNatureTargetX - buddhaNatureX) * 0.00002 * dt;
+  buddhaNatureY += (buddhaNatureTargetY - buddhaNatureY) * 0.00002 * dt;
+
+  if (!buddhaNatureVisible) {
+    // Currently vanished — check if vanish duration elapsed
+    buddhaNatureVanishDur -= dt;
+    if (buddhaNatureVanishDur <= 0) {
       buddhaNatureVisible = true;
+    }
+  } else if (buddhaNatureTimer > BUDDHA_NATURE_VANISH_CHECK) {
+    buddhaNatureTimer = 0;
+    // ~5% chance to vanish for a meaningful duration (1-3 breath cycles)
+    if (entropy() < 0.05) {
+      buddhaNatureVisible = false;
+      buddhaNatureVanishDur = 30000 + entropy() * 90000; // 30s to 2min
     }
   }
 }
@@ -948,7 +998,7 @@ function checkAureole(dt) {
     for (const a of agents) { sumX += a.x; sumY += a.y; }
     aureoleCx = sumX / agents.length;
     aureoleCy = sumY / agents.length;
-    aureoleCooldown = 20000 + Math.random() * 30000; // don't repeat too soon
+    aureoleCooldown = 20000 + entropy() * 30000; // don't repeat too soon
   }
   if (aureoleActive) {
     aureoleTimer += dt;
@@ -994,9 +1044,36 @@ function drawAureoleGlow() {
 }
 ```
 
-- [ ] **Step 2: Wire into main loop**
+- [ ] **Step 2: Wire into main loop and updateAgents**
 
-Call `checkAureole(dt)` after field update. Call `applyAureoleForce()` inside `updateAgents` at the end (after all other forces, before applying velocity). Call `drawAureoleGlow()` after agent drawing.
+Call `checkAureole(dt)` after field update in the main loop. Call `drawAureoleGlow()` after agent drawing.
+
+Modify `updateAgents`: add Thangka force calls at the end of the per-agent loop, **after** all other force accumulation and **before** the velocity application (`a.vx = a.vx * 0.95 + fx * 0.05`). Insert this block just before the `// Apply forces` comment:
+
+```javascript
+    // Thangka forces (aureole + mandala, added in Tasks 12-13)
+    applyAureoleForceToAgent(a);
+```
+
+And refactor `applyAureoleForce` to a per-agent version:
+
+```javascript
+function applyAureoleForceToAgent(a) {
+  if (!aureoleActive) return;
+  const progress = aureoleTimer / AUREOLE_DURATION;
+  if (progress > 0.5) return;
+  const strength = easeInOut(progress * 2) * 0.15;
+  const dx = a.x - aureoleCx, dy = a.y - aureoleCy;
+  const dist = Math.sqrt(dx * dx + dy * dy) + 1;
+  const angle = Math.atan2(dy, dx);
+  const targetDist = 50 + (Math.abs(Math.sin(angle * 6)) * 150);
+  const forceMag = (targetDist - dist) * strength * 0.01;
+  a.vx += Math.cos(angle) * forceMag;
+  a.vy += Math.sin(angle) * forceMag;
+}
+```
+
+Remove the original `applyAureoleForce()` that loops over all agents (it's now per-agent).
 
 - [ ] **Step 3: Verify**
 
@@ -1031,7 +1108,7 @@ function checkMandala(dt) {
   if (!mandalaActive && currentAspect === 'meditation' && field.cohesion > 0.8 && field.energy < 0.2 && mandalaCooldown <= 0) {
     mandalaActive = true;
     mandalaTimer = 0;
-    mandalaCooldown = 30000 + Math.random() * 60000;
+    mandalaCooldown = 30000 + entropy() * 60000;
   }
   if (mandalaActive) {
     mandalaTimer += dt;
@@ -1078,7 +1155,42 @@ function applyMandalaForce() {
 
 - [ ] **Step 2: Wire into main loop**
 
-Call `checkMandala(dt)` after `checkAureole(dt)`. Call `applyMandalaForce()` inside `updateAgents` alongside `applyAureoleForce()`.
+Call `checkMandala(dt)` after `checkAureole(dt)` in the main loop.
+
+Refactor `applyMandalaForce` to per-agent, same pattern as aureole. Add to the Thangka forces block in `updateAgents`:
+
+```javascript
+    applyAureoleForceToAgent(a);
+    applyMandalaForceToAgent(a, i); // needs agent index for ring assignment
+```
+
+Per-agent version:
+
+```javascript
+function applyMandalaForceToAgent(a, agentIndex) {
+  if (!mandalaActive) return;
+  const progress = mandalaTimer / MANDALA_DURATION;
+  let strength;
+  if (progress < 0.4) strength = easeInOut(progress / 0.4) * 0.2;
+  else if (progress < 0.7) strength = 0.2;
+  else strength = 0.2 * (1 - easeInOut((progress - 0.7) / 0.3));
+
+  const cx = W / 2, cy = H / 2;
+  const foldSymmetry = 8;
+  const dx = a.x - cx, dy = a.y - cy;
+  const angle = Math.atan2(dy, dx);
+  const sectorAngle = (Math.PI * 2) / foldSymmetry;
+  const snappedAngle = Math.round(angle / sectorAngle) * sectorAngle;
+  const ringIndex = Math.floor(agentIndex / (agents.length / 5));
+  const targetDist = 40 + ringIndex * 50;
+  const targetX = cx + Math.cos(snappedAngle) * targetDist;
+  const targetY = cy + Math.sin(snappedAngle) * targetDist;
+  a.vx += (targetX - a.x) * strength * 0.01;
+  a.vy += (targetY - a.y) * strength * 0.01;
+}
+```
+
+Remove the original `applyMandalaForce()` that loops over all agents.
 
 - [ ] **Step 3: Verify**
 
@@ -1142,7 +1254,8 @@ function drawFlameTrails() {
     if (v > 2.5) {
       ctx.beginPath();
       const forkStart = 0.4;
-      const forkAngle = baseAngle + (Math.random() > 0.5 ? 0.5 : -0.5);
+      // Use a.phase (persistent per-agent) for stable fork direction, not Math.random()
+      const forkAngle = baseAngle + (Math.sin(a.phase * 7.3) > 0 ? 0.5 : -0.5);
       const fx = Math.cos(baseAngle) * len * forkStart;
       const fy = Math.sin(baseAngle) * len * forkStart;
       ctx.moveTo(fx, fy);
@@ -1206,11 +1319,13 @@ function checkGold(dt) {
       field.warmth *                           // high warmth
       field.cohesion *                         // high cohesion
       (1 - Math.abs(field.rotation));          // low rotation
-    // Threshold: alignment must be > 0.3, plus luck
-    if (alignment > 0.3 && Math.random() < 0.002) { // ~0.2% per frame when aligned
+    // Threshold: alignment must be > 0.3, plus extreme luck
+    // At 60fps with alignment, ~0.003% per frame → expected ~1 trigger per 33s of alignment
+    // Combined with 3-6 min cooldown, gold appears roughly once per 20-60 minutes
+    if (alignment > 0.3 && entropy() < 0.00003) {
       goldActive = true;
       goldTimer = 0;
-      goldCooldown = 180000 + Math.random() * 180000; // 3-6 minutes between golds
+      goldCooldown = 180000 + entropy() * 180000; // 3-6 minutes between golds
     }
   }
 
