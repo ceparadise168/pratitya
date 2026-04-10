@@ -2,7 +2,7 @@
 
 A generative visual artwork inspired by Tibetan thangka painting traditions and Buddhist philosophy.
 
-**[View Live](https://erictu.github.io/pratitya/)**
+**[View Live](https://ceparadise168.github.io/pratitya/)**
 
 ## What is this?
 
