@@ -55,7 +55,6 @@ function resize() {
   // [Fix #1] Guard drawCoreGrid call
   if (typeof drawCoreGrid === 'function') drawCoreGrid();
 }
-resize();
 addEventListener('resize', resize);
 
 // === ENTROPY ===
@@ -958,7 +957,8 @@ function drawBN() {
   ctx.fill();
 }
 
-// === MAIN LOOP ===
+// === INIT ===
+resize(); // deferred until all functions are defined
 beginLife();
 
 let lastTime = performance.now();
