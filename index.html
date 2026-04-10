@@ -975,6 +975,7 @@ function beginLife() {
       break;
   }
   livingDur = Math.max(8000, livingDur);
+  silenceDur = Math.min(5000, silenceDur); // cap normal silence at 5s (true emptiness overrides)
   midlifeShiftDone = false;
   midlifeShiftPoint = 0.35 + Math.random() * 0.3;
   breathState = BREATH.BIRTH;
