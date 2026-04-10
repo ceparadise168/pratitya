@@ -122,7 +122,7 @@ const BREATH = { BIRTH: 0, LIVING: 1, DYING: 2, SILENCE: 3 };
 let breathState = BREATH.BIRTH;
 let breathTimer = 0;
 let breathAlpha = 0; // global alpha multiplier for all visuals
-let isTrueEmptiness = false; // placeholder for Task 10
+let isTrueEmptiness = false;
 
 let birthDur = 3000;
 let livingDur = 8000;
@@ -134,16 +134,21 @@ function easeInOut(t) {
 }
 
 function beginLife() {
-  birthDur = 2000 + Math.random() * 3000;
-  livingDur = 3000 + Math.random() * 20000;
-  dyingDur = 2000 + Math.random() * 4000;
-  silenceDur = 1000 + Math.random() * 5000;
+  const lifeScale = 0.3 + abundance * 1.4;
+  const silenceScale = 0.3 + (1 - abundance) * 2;
+
+  birthDur = (2000 + entropy() * 3000) * lifeScale;
+  livingDur = (3000 + entropy() * 20000) * lifeScale;
+  dyingDur = (2000 + entropy() * 4000) * lifeScale;
+  silenceDur = (1000 + entropy() * 5000) * silenceScale;
+
   breathState = BREATH.BIRTH;
   breathTimer = 0;
 
-  // Choose next aspect via karma
   const nextAspect = karmaChooseAspect();
   applyAspect(nextAspect);
+
+  driftBuddhaNature();
 }
 
 function updateBreath(dt) {
@@ -171,7 +176,13 @@ function updateBreath(dt) {
     case BREATH.DYING:
       breathAlpha = 1 - easeInOut(Math.min(breathTimer / dyingDur, 1));
       if (breathTimer >= dyingDur) {
+        stampTrace();
         harvestKarma();
+        isTrueEmptiness = entropy() < 0.15;
+        if (isTrueEmptiness) {
+          silenceDur = 15000 + entropy() * 90000;
+          traceCanvas.style.opacity = '0';
+        }
         breathState = BREATH.SILENCE;
         breathTimer = 0;
       }
@@ -224,8 +235,21 @@ function karmaChooseAspect() {
   return jittered[0][0];
 }
 
-// Start first life
-beginLife();
+// === MACRO 劫 ===
+let abundance = 0.5;
+let abundanceTarget = entropy();
+let abundanceShiftTimer = 0;
+let abundanceShiftInterval = 60000 + entropy() * 120000;
+
+function updateMacro(dt) {
+  abundanceShiftTimer += dt;
+  if (abundanceShiftTimer > abundanceShiftInterval) {
+    abundanceTarget = entropy();
+    abundanceShiftTimer = 0;
+    abundanceShiftInterval = 60000 + entropy() * 120000;
+  }
+  abundance += (abundanceTarget - abundance) * 0.00005 * dt;
+}
 
 // === AGENTS 眾生 ===
 const NUM_AGENTS = 200;
@@ -243,11 +267,13 @@ for (let i = 0; i < NUM_AGENTS; i++) {
 
 // === AGENT BEHAVIOR ===
 function updateAgents(t, dt) {
+  const activeCount = Math.floor(NUM_AGENTS * (0.3 + abundance * 0.7));
   const cx = W / 2, cy = H / 2;
   const speed = 0.3 + field.energy * 2.5;
   const pulseWave = Math.sin(t * 0.003 * (0.5 + field.pulse * 2));
 
-  for (const a of agents) {
+  for (let i = 0; i < activeCount; i++) {
+    const a = agents[i];
     let fx = 0, fy = 0;
 
     // Flow
@@ -271,7 +297,7 @@ function updateAgents(t, dt) {
 
     // Flocking: separation + alignment (sample every 3rd for perf)
     let sepX = 0, sepY = 0, alignX = 0, alignY = 0, nearCount = 0;
-    for (let j = 0; j < agents.length; j += 3) {
+    for (let j = 0; j < activeCount; j += 3) {
       const b = agents[j];
       if (b === a) continue;
       const bx = b.x - a.x, by = b.y - a.y;
@@ -324,6 +350,77 @@ function fieldToLightness() {
   return 35 + field.energy * 25;
 }
 
+// === TRACES 痕跡 ===
+function stampTrace() {
+  traceCtx.globalAlpha = 0.15;
+  traceCtx.drawImage(mainCanvas, 0, 0);
+  traceCtx.globalAlpha = 1.0;
+}
+
+function fadeTrace() {
+  traceCtx.globalCompositeOperation = 'destination-out';
+  traceCtx.fillStyle = 'rgba(0, 0, 0, 0.008)';
+  traceCtx.fillRect(0, 0, W, H);
+  traceCtx.globalCompositeOperation = 'source-over';
+}
+
+// === BUDDHA-NATURE 佛性 ===
+let buddhaNatureVisible = true;
+let buddhaNatureX = 0, buddhaNatureY = 0;
+let buddhaNatureTargetX = 0, buddhaNatureTargetY = 0;
+let buddhaNatureTimer = 0;
+const BUDDHA_NATURE_VANISH_CHECK = 30000;
+let buddhaNatureVanishDur = 0;
+
+function initBuddhaNature() {
+  buddhaNatureX = W * (0.15 + entropy() * 0.7);
+  buddhaNatureY = H * (0.15 + entropy() * 0.7);
+  buddhaNatureTargetX = buddhaNatureX;
+  buddhaNatureTargetY = buddhaNatureY;
+}
+initBuddhaNature();
+
+// Start first life (after abundance and buddha-nature vars are declared)
+beginLife();
+
+addEventListener('resize', () => {
+  buddhaNatureX = Math.min(buddhaNatureX, W - 10);
+  buddhaNatureY = Math.min(buddhaNatureY, H - 10);
+  buddhaNatureTargetX = Math.min(buddhaNatureTargetX, W - 10);
+  buddhaNatureTargetY = Math.min(buddhaNatureTargetY, H - 10);
+});
+
+function driftBuddhaNature() {
+  buddhaNatureTargetX = W * (0.15 + entropy() * 0.7);
+  buddhaNatureTargetY = H * (0.15 + entropy() * 0.7);
+}
+
+function updateBuddhaNature(dt) {
+  buddhaNatureTimer += dt;
+  buddhaNatureX += (buddhaNatureTargetX - buddhaNatureX) * 0.00002 * dt;
+  buddhaNatureY += (buddhaNatureTargetY - buddhaNatureY) * 0.00002 * dt;
+
+  if (!buddhaNatureVisible) {
+    buddhaNatureVanishDur -= dt;
+    if (buddhaNatureVanishDur <= 0) buddhaNatureVisible = true;
+  } else if (buddhaNatureTimer > BUDDHA_NATURE_VANISH_CHECK) {
+    buddhaNatureTimer = 0;
+    if (entropy() < 0.05) {
+      buddhaNatureVisible = false;
+      buddhaNatureVanishDur = 30000 + entropy() * 90000;
+    }
+  }
+}
+
+function drawBuddhaNature() {
+  if (!buddhaNatureVisible) return;
+  if (isTrueEmptiness && breathState === BREATH.SILENCE) return;
+  const t = performance.now();
+  const alpha = 0.06 + Math.sin(t * 0.001) * 0.03;
+  ctx.fillStyle = `rgba(200, 200, 210, ${alpha})`;
+  ctx.fillRect(buddhaNatureX, buddhaNatureY, 1, 1);
+}
+
 // === MAIN LOOP ===
 let lastTime = performance.now();
 
@@ -331,19 +428,32 @@ function loop(t) {
   const dt = t - lastTime;
   lastTime = t;
 
+  updateMacro(dt);
   lerpField(dt);
   updateBreath(dt);
+
+  // True emptiness: absolute void during rare silence
+  if (breathState === BREATH.SILENCE && isTrueEmptiness) {
+    ctx.clearRect(0, 0, W, H);
+    updateBuddhaNature(dt);
+    requestAnimationFrame(loop);
+    return;
+  }
+
+  fadeTrace();
 
   ctx.clearRect(0, 0, W, H);
 
   if (breathAlpha > 0.001) {
     updateAgents(t, dt);
+    const activeCount = Math.floor(NUM_AGENTS * (0.3 + abundance * 0.7));
 
     const hue = fieldToHue();
     const sat = fieldToSaturation();
     const light = fieldToLightness();
 
-    for (const a of agents) {
+    for (let i = 0; i < activeCount; i++) {
+      const a = agents[i];
       const r = a.size * (0.8 + field.energy * 0.6);
 
       ctx.beginPath();
@@ -367,8 +477,8 @@ function loop(t) {
     // Connection lines when cohesion > 0.4
     if (field.cohesion > 0.4) {
       const connAlpha = (field.cohesion - 0.4) * 0.25;
-      for (let i = 0; i < agents.length; i += 2) {
-        for (let j = i + 1; j < Math.min(i + 6, agents.length); j += 2) {
+      for (let i = 0; i < activeCount; i += 2) {
+        for (let j = i + 1; j < Math.min(i + 6, activeCount); j += 2) {
           const dx = agents[i].x - agents[j].x;
           const dy = agents[i].y - agents[j].y;
           const d = Math.sqrt(dx * dx + dy * dy);
@@ -392,6 +502,9 @@ function loop(t) {
   for (let i = 0; i < keys.length; i++) {
     ctx.fillText(`${keys[i]}: ${field[keys[i]].toFixed(3)}`, 10, 20 + i * 14);
   }
+
+  updateBuddhaNature(dt);
+  drawBuddhaNature();
 
   requestAnimationFrame(loop);
 }
