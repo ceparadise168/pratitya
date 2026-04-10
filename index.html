@@ -117,8 +117,115 @@ function applyAspect(name) {
   }
 }
 
-// Start with a random non-silence aspect
-applyAspect(['compassion', 'joy', 'meditation'][Math.floor(Math.random() * 3)]);
+// === BREATH 呼吸 ===
+const BREATH = { BIRTH: 0, LIVING: 1, DYING: 2, SILENCE: 3 };
+let breathState = BREATH.BIRTH;
+let breathTimer = 0;
+let breathAlpha = 0; // global alpha multiplier for all visuals
+let isTrueEmptiness = false; // placeholder for Task 10
+
+let birthDur = 3000;
+let livingDur = 8000;
+let dyingDur = 3000;
+let silenceDur = 2000;
+
+function easeInOut(t) {
+  return t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
+}
+
+function beginLife() {
+  birthDur = 2000 + Math.random() * 3000;
+  livingDur = 3000 + Math.random() * 20000;
+  dyingDur = 2000 + Math.random() * 4000;
+  silenceDur = 1000 + Math.random() * 5000;
+  breathState = BREATH.BIRTH;
+  breathTimer = 0;
+
+  // Choose next aspect via karma
+  const nextAspect = karmaChooseAspect();
+  applyAspect(nextAspect);
+}
+
+function updateBreath(dt) {
+  breathTimer += dt;
+
+  switch (breathState) {
+    case BREATH.BIRTH:
+      breathAlpha = easeInOut(Math.min(breathTimer / birthDur, 1));
+      if (breathTimer >= birthDur) {
+        breathState = BREATH.LIVING;
+        breathTimer = 0;
+      }
+      break;
+
+    case BREATH.LIVING:
+      breathAlpha = 1;
+      if (breathTimer >= livingDur) {
+        breathState = BREATH.DYING;
+        breathTimer = 0;
+        // Push field toward silence ONCE at transition, not every frame
+        applyAspect('silence');
+      }
+      break;
+
+    case BREATH.DYING:
+      breathAlpha = 1 - easeInOut(Math.min(breathTimer / dyingDur, 1));
+      if (breathTimer >= dyingDur) {
+        harvestKarma();
+        breathState = BREATH.SILENCE;
+        breathTimer = 0;
+      }
+      break;
+
+    case BREATH.SILENCE:
+      breathAlpha = 0;
+      if (breathTimer >= silenceDur) {
+        if (isTrueEmptiness) {
+          traceCanvas.style.opacity = '1';
+          isTrueEmptiness = false;
+        }
+        beginLife();
+      }
+      break;
+  }
+}
+
+// === KARMA 因緣 ===
+let karma = {
+  energy: 0.5,
+  warmth: 0.5,
+  rotation: 0,
+  cohesion: 0.5,
+};
+
+function harvestKarma() {
+  karma.energy = field.energy;
+  karma.warmth = field.warmth;
+  karma.rotation = field.rotation;
+  karma.cohesion = field.cohesion;
+}
+
+function karmaChooseAspect() {
+  const weights = {
+    wrath: 0.3 + karma.energy * 3 + karma.warmth * 1.5,
+    compassion: 0.5 + (1 - karma.energy) * 1.5 + karma.warmth * 1,
+    joy: 0.5 + karma.energy * 1.5 + (1 - Math.abs(karma.rotation)) * 0.5,
+    meditation: 0.3 + (1 - karma.energy) * 2 + karma.cohesion * 2,
+  };
+
+  const entries = Object.entries(weights);
+  const jittered = entries.map(([name, w]) => [name, w * (0.3 + entropy() * 1.4)]);
+  const total = jittered.reduce((sum, [, w]) => sum + w, 0);
+  let r = entropy() * total;
+  for (const [name, w] of jittered) {
+    r -= w;
+    if (r <= 0) return name;
+  }
+  return jittered[0][0];
+}
+
+// Start first life
+beginLife();
 
 // === AGENTS 眾生 ===
 const NUM_AGENTS = 200;
@@ -225,50 +332,54 @@ function loop(t) {
   lastTime = t;
 
   lerpField(dt);
-  updateAgents(t, dt);
+  updateBreath(dt);
 
   ctx.clearRect(0, 0, W, H);
 
-  const hue = fieldToHue();
-  const sat = fieldToSaturation();
-  const light = fieldToLightness();
+  if (breathAlpha > 0.001) {
+    updateAgents(t, dt);
 
-  for (const a of agents) {
-    const r = a.size * (0.8 + field.energy * 0.6);
+    const hue = fieldToHue();
+    const sat = fieldToSaturation();
+    const light = fieldToLightness();
 
-    ctx.beginPath();
-    ctx.arc(a.x, a.y, r, 0, Math.PI * 2);
-    ctx.fillStyle = `hsla(${hue + a.phase * 3}, ${sat}%, ${light}%, ${0.4 + field.energy * 0.4})`;
-    ctx.fill();
+    for (const a of agents) {
+      const r = a.size * (0.8 + field.energy * 0.6);
 
-    // Motion trail
-    const v = Math.sqrt(a.vx * a.vx + a.vy * a.vy);
-    if (v > 0.8) {
       ctx.beginPath();
-      ctx.moveTo(a.x, a.y);
-      ctx.lineTo(a.x - a.vx * 3, a.y - a.vy * 3);
-      ctx.strokeStyle = `hsla(${hue}, ${sat}%, ${light}%, ${Math.min(v * 0.08, 0.25)})`;
-      ctx.lineWidth = r * 0.5;
-      ctx.lineCap = 'round';
-      ctx.stroke();
-    }
-  }
+      ctx.arc(a.x, a.y, r, 0, Math.PI * 2);
+      ctx.fillStyle = `hsla(${hue + a.phase * 3}, ${sat}%, ${light}%, ${(0.4 + field.energy * 0.4) * breathAlpha})`;
+      ctx.fill();
 
-  // Connection lines when cohesion > 0.4
-  if (field.cohesion > 0.4) {
-    const connAlpha = (field.cohesion - 0.4) * 0.25;
-    for (let i = 0; i < agents.length; i += 2) {
-      for (let j = i + 1; j < Math.min(i + 6, agents.length); j += 2) {
-        const dx = agents[i].x - agents[j].x;
-        const dy = agents[i].y - agents[j].y;
-        const d = Math.sqrt(dx * dx + dy * dy);
-        if (d < 60) {
-          ctx.beginPath();
-          ctx.moveTo(agents[i].x, agents[i].y);
-          ctx.lineTo(agents[j].x, agents[j].y);
-          ctx.strokeStyle = `hsla(${hue}, ${sat * 0.5}%, ${light}%, ${connAlpha * (1 - d / 60)})`;
-          ctx.lineWidth = 0.4;
-          ctx.stroke();
+      // Motion trail
+      const v = Math.sqrt(a.vx * a.vx + a.vy * a.vy);
+      if (v > 0.8) {
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(a.x - a.vx * 3, a.y - a.vy * 3);
+        ctx.strokeStyle = `hsla(${hue}, ${sat}%, ${light}%, ${Math.min(v * 0.08, 0.25) * breathAlpha})`;
+        ctx.lineWidth = r * 0.5;
+        ctx.lineCap = 'round';
+        ctx.stroke();
+      }
+    }
+
+    // Connection lines when cohesion > 0.4
+    if (field.cohesion > 0.4) {
+      const connAlpha = (field.cohesion - 0.4) * 0.25;
+      for (let i = 0; i < agents.length; i += 2) {
+        for (let j = i + 1; j < Math.min(i + 6, agents.length); j += 2) {
+          const dx = agents[i].x - agents[j].x;
+          const dy = agents[i].y - agents[j].y;
+          const d = Math.sqrt(dx * dx + dy * dy);
+          if (d < 60) {
+            ctx.beginPath();
+            ctx.moveTo(agents[i].x, agents[i].y);
+            ctx.lineTo(agents[j].x, agents[j].y);
+            ctx.strokeStyle = `hsla(${hue}, ${sat * 0.5}%, ${light}%, ${connAlpha * (1 - d / 60) * breathAlpha})`;
+            ctx.lineWidth = 0.4;
+            ctx.stroke();
+          }
         }
       }
     }
