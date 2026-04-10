@@ -140,23 +140,35 @@ function lerpField(dt) {
   const de = fieldTarget.energy - field.energy;
   const dor = fieldTarget.order - field.order;
   const dist = Math.sqrt(de * de + dor * dor);
-  // P1-12: slower field transitions — large jumps take 1-2s not 0.2s
-  const rate = (0.0003 + dist * dist * 0.005) * dt;
+  const baseRate = 0.0003 + dist * dist * 0.005;
+  let tempoScale = 1.0;
+  if (currentEra === ERA.STORM) tempoScale = 3.0;
+  else if (currentEra === ERA.DRIFT) tempoScale = 0.5;
+  else if (currentEra === ERA.SPARSE) tempoScale = 0.7;
+  const rate = baseRate * tempoScale * dt;
   field.energy += de * rate;
   field.order += dor * rate;
 }
 
 function chooseNextTarget() {
-  // P2-18: Math.random() for field jumps — need full uniform range for dramatic shifts
   const isJump = Math.random() < 0.3;
   const range = isJump ? 0.8 : 0.3;
+
+  let eMin = 0, eMax = 1, oMin = 0, oMax = 1;
+  if (abundance < 0.3) {
+    eMax = 0.5;
+    if (Math.random() < 0.6) { oMax = 0.35; } else { oMin = 0.65; }
+  } else if (abundance > 0.7) {
+    eMin = 0.3; oMin = 0.3;
+  }
+
   let ne = field.energy + (Math.random() - 0.5) * 2 * range;
   let no = field.order + (Math.random() - 0.5) * 2 * range;
-  ne = Math.max(0, Math.min(1, ne));
-  no = Math.max(0, Math.min(1, no));
+  ne = Math.max(eMin, Math.min(eMax, ne));
+  no = Math.max(oMin, Math.min(oMax, no));
   if (Math.abs(ne - fieldTarget.energy) < 0.05 && Math.abs(no - fieldTarget.order) < 0.05) {
-    ne = entropy();
-    no = entropy();
+    ne = eMin + Math.random() * (eMax - eMin);
+    no = oMin + Math.random() * (oMax - oMin);
   }
   fieldTarget.energy = ne;
   fieldTarget.order = no;
@@ -165,18 +177,37 @@ function chooseNextTarget() {
 
 // === MACRO ===
 let abundance = 0.5;
-let abundanceTarget = entropy();
+let abundanceTarget = 0; // now used as perturbation offset, not target
 let macroTimer = 0;
 let macroInterval = 60000 + entropy() * 120000;
 
+// === ERA SYSTEM (世代) ===
+const ERA = { BLOOM: 0, SPARSE: 1, STORM: 2, DRIFT: 3 };
+let currentEra = ERA.BLOOM;
+let prevEra = ERA.BLOOM;
+
+// Macro arc phases (dual sine)
+let macroPhase1 = Math.random() * Math.PI * 2;
+let macroPhase2 = Math.random() * Math.PI * 2;
+
+// LIVING internal dynamics
+let midlifeShiftDone = false;
+let midlifeShiftPoint = 0;
+let livingBreathBase = 1.0;
+let livingBreathAmp = 0;
+let isReborn = false;
+
 function updateMacro(dt) {
+  macroPhase1 += dt * 0.000021;   // ~5 min cycle
+  macroPhase2 += dt * 0.0000052;  // ~20 min cycle
+  let base = 0.5 + 0.3 * Math.sin(macroPhase1) + 0.2 * Math.sin(macroPhase2);
   macroTimer += dt;
   if (macroTimer > macroInterval) {
-    abundanceTarget = entropy();
+    abundanceTarget = (Math.random() - 0.5) * 0.15;
     macroTimer = 0;
-    macroInterval = 60000 + entropy() * 120000;
+    macroInterval = 30000 + entropy() * 60000;
   }
-  abundance += (abundanceTarget - abundance) * 0.00005 * dt;
+  abundance = Math.max(0.05, Math.min(0.95, base + abundanceTarget));
 }
 
 // === THANGKA LINE QUALITY ===
@@ -885,16 +916,64 @@ let birthDur, livingDur, dyingDur, silenceDur;
 
 function easeInOut(t) { return t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t; }
 
+function chooseEra() {
+  prevEra = currentEra;
+  let weights = [1, 1, 1, 1]; // BLOOM, SPARSE, STORM, DRIFT
+  if (abundance > 0.65) { weights[0] += 3; weights[1] -= 0.5; }
+  if (abundance < 0.35) { weights[1] += 3; weights[0] -= 0.5; }
+  const dAbundance = 0.3 * Math.cos(macroPhase1) * 0.000021 + 0.2 * Math.cos(macroPhase2) * 0.0000052;
+  if (Math.abs(dAbundance) > 0.0000005) { weights[2] += 2; }
+  if (abundance > 0.3 && abundance < 0.6) { weights[3] += 1.5; }
+  if (prevEra === currentEra) { weights[currentEra] *= 0.15; }
+  weights = weights.map(w => Math.max(0.1, w));
+  const total = weights.reduce((a, b) => a + b, 0);
+  let r = Math.random() * total;
+  for (let i = 0; i < 4; i++) {
+    r -= weights[i];
+    if (r <= 0) { currentEra = i; return; }
+  }
+  currentEra = 0;
+}
+
 function beginLife() {
+  chooseEra();
+  isReborn = false;
   const ls = 0.3 + abundance * 1.4;
   const ss = 0.3 + (1 - abundance) * 2;
-  birthDur = (2000 + entropy() * 3000) * ls;
-  livingDur = (5000 + entropy() * 30000) * ls;
-  // [Fix #35] livingDur floor: Math.max(8000, livingDur)
+
+  switch (currentEra) {
+    case ERA.BLOOM:
+      birthDur = (2000 + entropy() * 3000) * ls;
+      livingDur = (10000 + entropy() * 35000) * ls;
+      dyingDur = (8000 + entropy() * 15000) * ls;
+      silenceDur = (300 + entropy() * 3000) * ss;
+      livingBreathBase = 1.0; livingBreathAmp = 0;
+      break;
+    case ERA.SPARSE:
+      birthDur = (3000 + entropy() * 5000) * ls;
+      livingDur = (3000 + entropy() * 10000) * ls;
+      dyingDur = (10000 + entropy() * 20000) * ls;
+      silenceDur = (3000 + entropy() * 15000) * ss;
+      livingBreathBase = 0.85; livingBreathAmp = 0.1;
+      break;
+    case ERA.STORM:
+      birthDur = (8000 + entropy() * 7000) * ls;
+      livingDur = (4000 + entropy() * 12000) * ls;
+      dyingDur = (3000 + entropy() * 6000) * ls;
+      silenceDur = (500 + entropy() * 2000) * ss;
+      livingBreathBase = 1.0; livingBreathAmp = 0;
+      break;
+    case ERA.DRIFT:
+      birthDur = (2000 + entropy() * 4000) * ls;
+      livingDur = (8000 + entropy() * 25000) * ls;
+      dyingDur = (12000 + entropy() * 18000) * ls;
+      silenceDur = (1000 + entropy() * 6000) * ss;
+      livingBreathBase = 0.75; livingBreathAmp = 0.15;
+      break;
+  }
   livingDur = Math.max(8000, livingDur);
-  // Dying is the visible fade-out portion of 退潮, not the entire arc
-  dyingDur = (8000 + entropy() * 15000) * ls;
-  silenceDur = (500 + entropy() * 8000) * ss;
+  midlifeShiftDone = false;
+  midlifeShiftPoint = 0.35 + Math.random() * 0.3;
   breathState = BREATH.BIRTH;
   breathTimer = 0;
   chooseNextTarget();
@@ -904,33 +983,83 @@ function updateBreath(dt) {
   breathTimer += dt;
   switch (breathState) {
     case BREATH.BIRTH:
-      breathAlpha = easeInOut(Math.min(breathTimer / birthDur, 1));
-      if (breathTimer >= birthDur) { breathState = BREATH.LIVING; breathTimer = 0; }
+      if (currentEra === ERA.STORM && !isReborn) {
+        const baseRise = easeInOut(Math.min(breathTimer / birthDur, 1));
+        const flicker = Math.sin(breathTimer * 0.003) * 0.15;
+        breathAlpha = Math.max(0.1, Math.min(0.5, baseRise * 0.5 + flicker));
+      } else {
+        breathAlpha = easeInOut(Math.min(breathTimer / birthDur, 1));
+      }
+      if (breathTimer >= birthDur) {
+        breathState = BREATH.LIVING; breathTimer = 0;
+        if (currentEra === ERA.STORM && !isReborn) {
+          fieldTarget.energy = 0.75 + Math.random() * 0.25;
+          fieldTarget.order = Math.random();
+          deriveParams();
+        }
+      }
       break;
+
     case BREATH.LIVING:
-      breathAlpha = 1;
+      if (livingBreathAmp > 0) {
+        breathAlpha = livingBreathBase + Math.sin(breathTimer * 0.0008) * livingBreathAmp;
+      } else {
+        breathAlpha = 1;
+      }
+
+      if (!midlifeShiftDone && breathTimer > livingDur * midlifeShiftPoint) {
+        midlifeShiftDone = true;
+        if (currentEra === ERA.STORM) {
+          chooseNextTarget();
+        } else {
+          fieldTarget.energy = Math.max(0, Math.min(1, field.energy + (Math.random() - 0.5) * 0.2));
+          fieldTarget.order = Math.max(0, Math.min(1, field.order + (Math.random() - 0.5) * 0.2));
+          deriveParams();
+        }
+      }
+
+      // STORM: extra high-frequency field oscillation
+      if (currentEra === ERA.STORM) {
+        const stormCheck = Math.floor(breathTimer / 4000);
+        const prevCheck = Math.floor((breathTimer - dt) / 4000);
+        if (stormCheck > prevCheck) chooseNextTarget();
+      }
+
+      // Rare event: sudden death (~3.5% per 30s LIVING)
+      if (!isReborn && Math.random() < 0.00002) {
+        breathState = BREATH.DYING; breathTimer = 0; dyingDur = 200;
+        break;
+      }
+
       if (breathTimer >= livingDur) {
         breathState = BREATH.DYING; breathTimer = 0;
         fieldTarget.energy = entropy() * 0.1;
-        fieldTarget.order = field.order + (entropy() - 0.5) * 0.3;
-        fieldTarget.order = Math.max(0, Math.min(1, fieldTarget.order));
+        fieldTarget.order = Math.max(0, Math.min(1, field.order + (entropy() - 0.5) * 0.3));
+        deriveParams();
       }
       break;
+
     case BREATH.DYING: {
       const progress = Math.min(breathTimer / dyingDur, 1);
-      // [Fix #29] Final 5%: snap alpha to 0 instantly
-      if (progress > 0.95) {
-        breathAlpha = 0;
-      } else {
-        breathAlpha = 1 - easeInOut(progress);
+
+      // Rare event: rebirth (~2% during DYING 30-70%)
+      if (!isReborn && progress > 0.3 && progress < 0.7 && Math.random() < 0.0001) {
+        isReborn = true;
+        breathState = BREATH.LIVING; breathTimer = 0;
+        livingDur = Math.max(3000, livingDur * (0.3 + Math.random() * 0.2));
+        fieldTarget.energy = 0.8 + Math.random() * 0.2;
+        fieldTarget.order = Math.random() * 0.3;
+        livingBreathBase = 0.9; livingBreathAmp = 0.1;
+        midlifeShiftDone = true;
+        deriveParams();
+        break;
       }
+
+      breathAlpha = progress > 0.95 ? 0 : 1 - easeInOut(progress);
       if (breathTimer >= dyingDur) {
         checkTrueEmptiness();
-        breathState = BREATH.SILENCE;
-        breathTimer = 0;
-        // [Fix #37] Clean up patterns when entering SILENCE
+        breathState = BREATH.SILENCE; breathTimer = 0;
         bgPatterns.length = 0;
-        // Beings that are still alive get to keep dying but new ones won't spawn
       }
       break;
     }
