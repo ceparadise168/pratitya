@@ -128,20 +128,11 @@ function isWarmColorUnlocked() { return colorMaturity > 0.6; }
 // === FIELD ===
 const field = { energy: 0.3, order: 0.5 };
 const fieldTarget = { energy: 0.3, order: 0.5 };
-const derived = { warmth: 0.5, rotation: 0, flowX: 0, flowY: 0, pulse: 0 };
-
-// [Fix #3] Rotation direction stored as state, only changed in chooseNextTarget
-let rotationDirection = 1;
+// P2-14: only warmth is used by rendering; rotation/flow/pulse removed as dead code
+const derived = { warmth: 0.5 };
 
 function deriveParams() {
-  const e = field.energy, o = field.order;
-  derived.warmth = e * 0.6 + (1 - o) * 0.4;
-  // [Fix #3] Use stored rotationDirection, do not re-roll
-  derived.rotation = rotationDirection * e * (1 - Math.abs(o - 0.5) * 2) * 0.8;
-  const flowStrength = e * (1 - o) * 1.5;
-  derived.flowX = (entropy() - 0.5) * 2 * flowStrength;
-  derived.flowY = (entropy() - 0.5) * 2 * flowStrength;
-  derived.pulse = (1 - Math.abs(e - 0.5) * 2) * 0.6;
+  derived.warmth = field.energy * 0.6 + (1 - field.order) * 0.4;
 }
 
 // [Fix #4] lerpField acceleration: increase quadratic coefficient to 0.02
@@ -156,13 +147,11 @@ function lerpField(dt) {
 }
 
 function chooseNextTarget() {
-  // [Fix #3] Change rotation direction here only
-  rotationDirection = entropy() > 0.5 ? 1 : -1;
-
-  const isJump = entropy() < 0.3;
+  // P2-18: Math.random() for field jumps — need full uniform range for dramatic shifts
+  const isJump = Math.random() < 0.3;
   const range = isJump ? 0.8 : 0.3;
-  let ne = field.energy + (entropy() - 0.5) * 2 * range;
-  let no = field.order + (entropy() - 0.5) * 2 * range;
+  let ne = field.energy + (Math.random() - 0.5) * 2 * range;
+  let no = field.order + (Math.random() - 0.5) * 2 * range;
   ne = Math.max(0, Math.min(1, ne));
   no = Math.max(0, Math.min(1, no));
   if (Math.abs(ne - fieldTarget.energy) < 0.05 && Math.abs(no - fieldTarget.order) < 0.05) {
@@ -210,13 +199,23 @@ function strokeThangka(pathPoints, baseWidth, color, alpha, embedColor) {
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
 
-  // Principle 2: Embedded edge — wider, dimmer base layer (P1-11: +0.5 not +1)
+  // Principle 2: Embedded edge — wider, dimmer base layer
+  // P2-22: embed layer uses quadraticCurveTo for smoother curves (no breathing needed here)
   if (embedColor) {
     ctx.lineWidth = baseWidth + 0.5;
     ctx.strokeStyle = embedColor;
     ctx.beginPath();
     ctx.moveTo(pathPoints[0].x, pathPoints[0].y);
-    for (let i = 1; i < pathPoints.length; i++) ctx.lineTo(pathPoints[i].x, pathPoints[i].y);
+    for (let i = 1; i < pathPoints.length; i++) {
+      if (i < pathPoints.length - 1) {
+        // Smooth curve through midpoints
+        const mx = (pathPoints[i].x + pathPoints[i+1].x) / 2;
+        const my = (pathPoints[i].y + pathPoints[i+1].y) / 2;
+        ctx.quadraticCurveTo(pathPoints[i].x, pathPoints[i].y, mx, my);
+      } else {
+        ctx.lineTo(pathPoints[i].x, pathPoints[i].y);
+      }
+    }
     ctx.stroke();
   }
 
@@ -256,7 +255,8 @@ function goldTone(angle, alpha) {
 function arcToPoints(cx, cy, r, startAngle, endAngle, steps) {
   const pts = [];
   const range = endAngle - startAngle;
-  const n = steps || Math.max(8, Math.floor(Math.abs(range) * r / 10));
+  // P2-13: cap at 24 steps to avoid excessive points on large radii
+  const n = steps || Math.min(24, Math.max(8, Math.floor(Math.abs(range) * r / 10)));
   for (let i = 0; i <= n; i++) {
     const a = startAngle + (i / n) * range;
     pts.push({ x: cx + Math.cos(a) * r, y: cy + Math.sin(a) * r });
@@ -296,7 +296,7 @@ function drawCoreGrid() {
     coreCtx.strokeStyle = goldTone(angle, 0.1);
     coreCtx.beginPath();
     coreCtx.moveTo(CX, CY);
-    coreCtx.lineTo(CX + Math.cos(angle) * R * 0.8, CY + Math.sin(angle) * R * 0.8);
+    coreCtx.lineTo(CX + Math.cos(angle) * R * 0.95, CY + Math.sin(angle) * R * 0.95); // P2-17
     coreCtx.stroke();
   }
 
@@ -304,11 +304,11 @@ function drawCoreGrid() {
   coreCtx.lineWidth = 0.7;
   coreCtx.strokeStyle = goldTone(0, 0.14); // horizontal
   coreCtx.beginPath();
-  coreCtx.moveTo(CX - R * 0.8, CY); coreCtx.lineTo(CX + R * 0.8, CY);
+  coreCtx.moveTo(CX - R * 0.95, CY); coreCtx.lineTo(CX + R * 0.95, CY); // P2-17
   coreCtx.stroke();
-  coreCtx.strokeStyle = goldTone(Math.PI / 2, 0.14); // vertical
+  coreCtx.strokeStyle = goldTone(Math.PI / 2, 0.14);
   coreCtx.beginPath();
-  coreCtx.moveTo(CX, CY - R * 0.8); coreCtx.lineTo(CX, CY + R * 0.8);
+  coreCtx.moveTo(CX, CY - R * 0.95); coreCtx.lineTo(CX, CY + R * 0.95); // P2-17
   coreCtx.stroke();
 
   // [Fix #7] Non-uniform proportion arcs (1:2:3:5 ratio based) to hint at body structure
@@ -333,10 +333,33 @@ function drawCoreGrid() {
 }
 
 // [Fix #8] Core breath CSS: 0.5 + sin * 0.35
+// P2-16: non-symmetric breathing — inhale faster, exhale slower, plateau at bottom
+// P2-21: redraw core grid at low frequency instead of CSS opacity (avoids compositing cost)
 let coreBreathPhase = 0;
+let coreRedrawTimer = 0;
+function asymmetricBreath(phase) {
+  // Normalize phase to 0-1 cycle
+  const t = (phase % (Math.PI * 2)) / (Math.PI * 2);
+  if (t < 0.4) {
+    // Inhale: 0→1 in 40% of cycle (fast rise)
+    return t / 0.4;
+  } else if (t < 0.9) {
+    // Exhale: 1→0 in 50% of cycle (slow fall)
+    return 1 - (t - 0.4) / 0.5;
+  } else {
+    // Plateau at bottom: hold near 0 for 10% of cycle
+    return 0;
+  }
+}
 function updateCoreBreath(dt) {
-  coreBreathPhase += dt * 0.0001; // full cycle ~60s
-  coreCanvas.style.opacity = 0.5 + Math.sin(coreBreathPhase) * 0.35;
+  coreBreathPhase += dt * 0.0001;
+  // Redraw core grid every 2 seconds with updated alpha
+  coreRedrawTimer += dt;
+  if (coreRedrawTimer > 2000) {
+    coreRedrawTimer = 0;
+    const breath = asymmetricBreath(coreBreathPhase);
+    coreCanvas.style.opacity = 0.15 + breath * 0.7; // range 0.15 to 0.85
+  }
 }
 
 // === PATTERNS ===
@@ -381,7 +404,8 @@ function spawnBgPattern(inheritRecord) {
 
   dist = Math.max(R * 0.05, Math.min(R * 0.85, dist));
 
-  let maxLife = 3000 + entropy() * 15000;
+  // P2-18: Math.random() for lifespan — need dramatic extremes, not central tendency
+  let maxLife = 3000 + Math.random() * 15000;
   // [Fix #11] Distance-driven gradient
   maxLife *= (1.5 - dist / R);
 
@@ -522,6 +546,12 @@ function renderPattern(p) {
         innerPts.push({x, y});
       }
       strokeThangka(innerPts, lw * 0.8, color, a, null);
+      // P2-20: nested arcs at high energy + high order — visual density without more patterns
+      if (field.energy > 0.7 && field.order > 0.7) {
+        const nestR = p.r * 0.75;
+        const nestPts = arcToPoints(CX, CY, nestR, startAngle + 0.05, endAngle - 0.05);
+        strokeThangka(nestPts, lw * 0.6, color, a * 0.5, null);
+      }
       break;
     }
     case 'spiral': {
@@ -584,7 +614,7 @@ function spawnBeing(inheritR, inheritTheta, inheritType, inheritArcSpan) {
     r: Math.max(R * 0.05, Math.min(R * 0.7, dist)),
     theta,
     age: 0,
-    maxLife: 15000 + entropy() * 45000,
+    maxLife: 15000 + Math.random() * 45000, // P2-18: dramatic range
     alpha: 0,
     arcSpan,
     spiralTurns: 1.5 + entropy() * 1.5,
@@ -626,16 +656,13 @@ function renderBeing(b) {
   const a = b.alpha * breathAlpha * fadeFromCenter * dirAlpha;
   if (a < 0.005 && !b.dying) return;
 
-  // [Fix #20] Faint shadowBlur for beings
-  ctx.shadowColor = hsl(b.colorKey, a * 0.3);
-  ctx.shadowBlur = 4;
+  // P2-19: shadowBlur removed — embedColor already provides glow, shadowBlur is perf-heavy
 
   ctx.strokeStyle = hsl(b.colorKey, a * 0.85);
   ctx.lineWidth = b.lineWidth * b.sizeScale;
   ctx.lineCap = 'round';
 
   if (b.dying) {
-    ctx.shadowBlur = 0;
     // Death animation: fragments scatter
     for (const f of b.fragments) {
       // P1-8: slower drift
@@ -669,7 +696,7 @@ function renderBeing(b) {
     for (let s = 0; s <= steps; s++) {
       const t = s / steps;
       const angle = b.theta - span / 2 + t * span;
-      const maxWobble = R * 0.005;
+      const maxWobble = R * 0.002; // P2-15
       const rawWobble = Math.sin(t * Math.PI * 3 + b.phaseOffset + b.age * 0.001) * b.curveBias * 0.1;
       const wobble = Math.max(-maxWobble, Math.min(maxWobble, rawWobble));
       const pr = b.r + wobble;
@@ -683,7 +710,7 @@ function renderBeing(b) {
       const t = s / steps;
       const sr = b.r * (1 - t * 0.3) * b.sizeScale;
       const sa = b.theta + t * b.spiralTurns * Math.PI * 0.5;
-      const maxWobble = R * 0.005;
+      const maxWobble = R * 0.002; // P2-15
       const rawWobble = Math.sin(t * Math.PI * 2 + b.phaseOffset + b.age * 0.0008) * b.curveBias * 0.15;
       const wobble = Math.max(-maxWobble, Math.min(maxWobble, rawWobble));
       pts.push({ x: CX + Math.cos(sa) * (sr + wobble), y: CY + Math.sin(sa) * (sr + wobble) });
@@ -691,8 +718,6 @@ function renderBeing(b) {
     strokeThangka(pts, beingLw, beingColor, a, beingEmbed);
   }
 
-  // Reset shadow
-  ctx.shadowBlur = 0;
 }
 
 // [Fix #21] stampBeingTrace must draw actual being shape, not just arc
