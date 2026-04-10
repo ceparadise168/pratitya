@@ -898,8 +898,8 @@ function beginLife() {
   livingDur = (5000 + entropy() * 30000) * ls;
   // [Fix #35] livingDur floor: Math.max(8000, livingDur)
   livingDur = Math.max(8000, livingDur);
-  // P1-6: spec requires 30-90s dying (退潮). Base 20-60s before scaling.
-  dyingDur = (20000 + entropy() * 40000) * ls;
+  // Dying is the visible fade-out portion of 退潮, not the entire arc
+  dyingDur = (8000 + entropy() * 15000) * ls;
   silenceDur = (500 + entropy() * 8000) * ss;
   breathState = BREATH.BIRTH;
   breathTimer = 0;
