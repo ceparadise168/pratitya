@@ -697,6 +697,18 @@ function drawMandalaSkeleton() {
 // P2-21: redraw core grid at low frequency instead of CSS opacity (avoids compositing cost)
 let coreBreathPhase = 0;
 let coreRedrawTimer = 0;
+// 真空-purity gate 狀態(繪製層,只讀 isTrueEmptiness/breathState,不改靈魂):
+//   coreAppliedOpacity = 目前實際寫到 canvas 的 opacity(供平滑 fade-out + 乾淨 restore)。
+//   coreVoidGating     = 上一幀是否處於真空收斂;用來偵測「真空→重生」的 restore edge。
+// 初始 0.5 = 既有 breath 中段,避免首幀與 init 不一致。
+let coreAppliedOpacity = 0.5;
+let coreVoidGating = false;
+let coreWrittenOpacity = '';                   // 上次寫入 #core 的 opacity 字串
+// write-on-change:只在值改變時寫 DOM → 真空收斂到 "0.000" 後不再無謂逐幀寫。
+function setCoreOpacity(v) {
+  const s = v.toFixed(3);
+  if (s !== coreWrittenOpacity) { coreCanvas.style.opacity = s; coreWrittenOpacity = s; }
+}
 function asymmetricBreath(phase) {
   // Normalize phase to 0-1 cycle
   const t = (phase % (Math.PI * 2)) / (Math.PI * 2);
@@ -713,12 +725,47 @@ function asymmetricBreath(phase) {
 }
 function updateCoreBreath(dt) {
   coreBreathPhase += dt * 0.0001;
+
+  // ── 真空-purity gate ──────────────────────────────────────────────
+  // 只在 true-emptiness(SILENCE 且 isTrueEmptiness)時讓 core 骨架溶入虛空 → 0。
+  // SCOPE:一般 SILENCE(!isTrueEmptiness)絕不進這支,維持既有 breathing,
+  //        否則每個 cycle 間的短暫靜默都會把 core 閃黑、破壞節律。
+  // TIMING:不受 coreRedrawTimer(2000ms)節流,每幀即時收斂 → 真空一開始就生效。
+  // 平滑:per-frame 指數衰減(~0.6s 入虛空),勝過硬切。
+  if (isTrueEmptiness && breathState === BREATH.SILENCE) {
+    const k = 1 - Math.exp(-dt / 200);          // dt→0 時 0、~600ms 達 ~95%
+    coreAppliedOpacity += (0 - coreAppliedOpacity) * k;
+    if (coreAppliedOpacity < 0.002) coreAppliedOpacity = 0;
+    setCoreOpacity(coreAppliedOpacity);
+    coreVoidGating = true;
+    return;
+  }
+
+  // ── RESTORE(真空→重生 edge):core 被收斂到接近 0,需平滑 fade-in ──────
+  // 真空結束後 isTrueEmptiness 變回 false → 走到這。先用 per-frame lerp 把
+  // coreAppliedOpacity 追上既有 breath target,避免卡在 0 或 pop;追上後
+  // 清旗標、交還給原本「每 2s 離散更新」的呼吸路徑(手感完全不變)。
+  if (coreVoidGating) {
+    const breath = asymmetricBreath(coreBreathPhase);
+    const target = 0.15 + breath * 0.7;
+    const k = 1 - Math.exp(-dt / 200);          // 對稱地 fade-in,~0.6s
+    coreAppliedOpacity += (target - coreAppliedOpacity) * k;
+    setCoreOpacity(coreAppliedOpacity);
+    if (Math.abs(target - coreAppliedOpacity) < 0.01) {
+      coreVoidGating = false;                    // 收斂完成 → 回正常路徑
+      coreRedrawTimer = 0;                       // 對齊 cadence,下個 sample 自然接續
+    }
+    return;
+  }
+
+  // ── 正常呼吸(BIRTH/LIVING/DYING/一般 SILENCE):既有行為,原封不動 ──────
   // Redraw core grid every 2 seconds with updated alpha
   coreRedrawTimer += dt;
   if (coreRedrawTimer > 2000) {
     coreRedrawTimer = 0;
     const breath = asymmetricBreath(coreBreathPhase);
-    coreCanvas.style.opacity = 0.15 + breath * 0.7; // range 0.15 to 0.85
+    coreAppliedOpacity = 0.15 + breath * 0.7;    // 鏡像記錄,供下次 gate 起點正確
+    setCoreOpacity(coreAppliedOpacity);          // range 0.15 to 0.85(write-on-change)
   }
 }
 
