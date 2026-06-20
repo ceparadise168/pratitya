@@ -1,3 +1,6 @@
 .DS_Store
 .superpowers/
 node_modules/
+
+# playwright / tool scratch (verification screenshots & snapshots)
+.playwright-mcp/

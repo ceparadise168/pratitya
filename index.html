@@ -8,6 +8,7 @@
 *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 html, body { width: 100%; height: 100%; overflow: hidden; background: #000; cursor: none; }
 canvas { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; }
+#substrate { z-index: -1; }
 #trace { z-index: 0; }
 #core  { z-index: 1; }
 #main  { z-index: 2; }
@@ -33,9 +34,17 @@ const coreCtx  = coreCanvas.getContext('2d');
 const ctx      = mainCanvas.getContext('2d');
 let W, H, CX, CY, R, dpr;
 
+// [Opt] DPR safety cap. Per-frame fill cost scales with backing-store pixels = W·H·dpr².
+// A true-4K projector reports dpr=1 (this is a no-op there — already as lean as DPR allows).
+// Its job is to stop a HiDPI / OS-scaled display from silently 4×-inflating the backing
+// store (up to ~33M px) and tanking the 60fps budget. Faint line art tolerates mild
+// softening far better than dropped frames. Drop to 1.0 to force native-only on the
+// exhibition machine; raise for a crisper desktop preview.
+const MAX_DPR = 1.5;
+
 function resize() {
   // [Fix #2] Handle devicePixelRatio: canvas dimensions x dpr, CSS unchanged
-  dpr = window.devicePixelRatio || 1;
+  dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
   W = innerWidth;
   H = innerHeight;
   const cw = W * dpr;
@@ -55,6 +64,13 @@ function resize() {
 
   // [Fix #1] Guard drawCoreGrid call
   if (typeof drawCoreGrid === 'function') drawCoreGrid();
+  // FAUX-BLOOM: glow buffer + coreGlow must follow W/H/R/CX/CY. resizeBloom
+  // has an internal "size unchanged → no realloc" guard, so repeated resizes
+  // never new a canvas. Guarded so first resize() (before initBloom) is a no-op.
+  if (typeof resizeBloom === 'function' && BLOOM.enabled && gBuf) resizeBloom();
+  // SUBSTRATE: re-tile on size change. bakeSubstrate has a same-size guard (like
+  // resizeBloom), so repeated/identical resizes never re-bake. dpr-agnostic (CSS-size backing).
+  if (typeof bakeSubstrate === 'function' && SUBSTRATE.enabled && substrateCanvas) bakeSubstrate();
 }
 addEventListener('resize', resize);
 
@@ -81,9 +97,83 @@ const PAIRS = [
   ['gold', 'vermilion'],
 ];
 
+// ============================================================
+//  礦物顏料老化漂移 (維度三:色彩真實度 — 藍→綠 weathering)
+//  詩學非物理 (研究 §3C/§8#5):azurite 族在展期尺度極慢往綠移 +
+//  略降飽和。連顏料都被緣起、無常 —— 騎在既有 macro-time / rebirth 上。
+//  純色彩解析層:只改「某 key 解析成什麼 hue」,不碰「選哪個 key」。
+//  狀態獨立(不碰 field/macro);真空(真空=重生)時 age 煥新歸零。
+// ============================================================
+const PIGMENT = {
+  enabled: true,       // 總開關。false → hsl() 走原樣,零漂移、零成本。
+  // --- 速率(單向老化)---
+  // age 0→1 的時間 ≈ 1 / RATE 毫秒。預設 ~25 分鐘到「最老」。
+  // 展演尺度可調更慢(數小時/數天):見 tunables。
+  RATE: 1 / (25 * 60 * 1000),   // per-ms,作用於 dt
+  // --- 天花板(最老時的偏移上限,age=1 時生效)---
+  HUE_CEIL: -24,       // 色相最大位移(度)。負=往綠(azurite→malachite 方向)。
+  SAT_CEIL: -12,       // 飽和最大位移(百分點)。負=略褪。
+  // L 不動:不抬黑、保 faint。
+  // --- 真空煥新 ---
+  // true-emptiness(真空=重生)期間,age 以此速率朝 0 衰退 = 顏料煥新。
+  // 比老化快(空是「重置」不是「慢慢變回去」),但仍平滑、不跳變。
+  REJUV_RATE: 1 / (8 * 1000),    // ~8s 真空內幾乎歸零
+  // --- 每個 PALETTE key 對 azurite 老化的「易感度」權重 [0..1] ---
+  // 你劃的邊界:deepBlue 主角;冷族 emerald/purple 輕觸;暖族穩定;gold 不漂。
+  W: {
+    deepBlue:  1.00,   // azurite:主角
+    emerald:   0.35,   // 冷族:sympathetic 微移(本就偏綠,只加深)
+    purple:    0.45,   // 冷族:violet 略往藍冷移
+    gold:      0.00,   // 金=永恆/神聖:不照 azurite 老化(見 GOLD_PATINA)
+    vermilion: 0.00,   // 暖族:穩定
+    warmWhite: 0.00,   // 暖族:穩定
+  },
+  // --- 金的「極輕暖 patina」(獨立於 azurite 漂移)---
+  // 金不變綠;預設近零。要的話給一點點往琥珀的暖(正 hue 往 amber、微降 hue)。
+  GOLD_PATINA: { dh: 0, ds: 0 },   // 預設 0 = 金完全不老。要試:{ dh:-2, ds:-1 }
+};
+
+// 漂移狀態:獨立純量,dt 推進。像 macroPhase 但不碰 updateMacro。
+let pigmentAge = 0;   // [0..1];0=新顏料,1=最老。force-age 改它即可(見 tunables)。
+
+// 每幀推進。放 loop 既有 updateColorMaturity(dt) 旁。
+// 只讀 isTrueEmptiness(真空旗標),不改其邏輯。
+function updatePigment(dt) {
+  if (!PIGMENT.enabled) return;
+  if (isTrueEmptiness && breathState === BREATH.SILENCE) {
+    // 真空=重生:顏料煥新,age 平滑朝 0。
+    pigmentAge -= dt * PIGMENT.REJUV_RATE;
+    if (pigmentAge < 0) pigmentAge = 0;
+  } else {
+    // 平時:極慢單向老化,封頂 1(不會無限漂爆)。
+    if (pigmentAge < 1) {
+      pigmentAge += dt * PIGMENT.RATE;
+      if (pigmentAge > 1) pigmentAge = 1;
+    }
+  }
+}
+
+// hsl():唯一色彩解析 chokepoint。簽名不變、call site 零改。
+// 在這裡把 PALETTE 的 h/s 套上老化 offset;PALETTE 物件本身只讀、不被改。
 function hsl(color, alpha) {
   const c = PALETTE[color];
-  return `hsla(${c.h}, ${c.s}%, ${c.l}%, ${alpha})`;
+  if (!PIGMENT.enabled || pigmentAge <= 0) {
+    return `hsla(${c.h}, ${c.s}%, ${c.l}%, ${alpha})`;   // 原樣快路徑
+  }
+  let h = c.h, s = c.s;
+  const w = PIGMENT.W[color];        // 未列的 key → undefined → 不漂
+  if (w) {
+    h += PIGMENT.HUE_CEIL * w * pigmentAge;   // 往綠
+    s += PIGMENT.SAT_CEIL * w * pigmentAge;   // 略褪
+    if (s < 0) s = 0;
+  } else if (color === 'gold') {
+    // 金:不照 azurite 漂,只極輕暖 patina(預設 0)。
+    h += PIGMENT.GOLD_PATINA.dh * pigmentAge;
+    s += PIGMENT.GOLD_PATINA.ds * pigmentAge;
+    if (s < 0) s = 0;
+  }
+  // L 不碰:保 faint、不抬黑。
+  return `hsla(${h}, ${s}%, ${c.l}%, ${alpha})`;
 }
 
 // [Fix #9] Color pair selection: collect all pairs containing primary,
@@ -218,22 +308,134 @@ function updateMacro(dt) {
 // 2. Embedded edges: 0.5px fusion with adjacent color
 // 3. Angle-dependent gold tone
 
-// Stroke a path with breathing micro-variation in line width.
-// Instead of ctx.stroke() on a complete path, we re-draw it as short segments
-// with gently oscillating lineWidth. Call AFTER ctx.beginPath() + moveTo/lineTo/etc.
-// pathPoints: array of {x, y} — the discretized path
-// baseWidth: nominal lineWidth
-// color: hsla string
-// alpha: overall alpha
-// embedColor: optional adjacent color for embedded edge (null = skip)
+// ============================================================
+//  SANDSTROKE 顆粒筆觸 (維度一 #1 質感)
+//  把 strokeThangka 的主描邊從連續向量線 → 沿路徑沉積的顆粒。
+//  純 2D、零相依。primitive = fillRect 小方塊(實測比 arc 快 8.6×)。
+//  全部實測驗證:peak 58 元素整場 grains 0.2ms avg / 0.9ms max;
+//  faintnessGuard 實測沉積亮度 ≈ 原描邊 0.53–0.85×(永不變亮)。
+// ============================================================
+
+// --- 可調參數(集中,方便現場微調)---
+const SAND = {
+  spacing:      2.0,   // 沿脊線顆粒間距(px)。越小越濃。實測 2.2→亮度0.53×;2.0 目標 ~0.7×
+  spacingMin:   2.0,   // 降級時 spacing 不會比這更密
+  spacingMax:   4.2,   // 降級時 spacing 上限(越稀疏越省)
+  sigmaScale:   0.5,   // 法線(橫向)抖動 = baseWidth * sigmaScale
+  alongScale:   0.45,  // 沿脊線抖動 = spacing * alongScale
+  grainAlpha:   0.85,  // per-grain alpha = (原描邊 alpha) * grainAlpha,並 clamp 上限
+  grainAlphaCap:0.55,  // per-grain alpha 硬上限(防單顆過濃)
+  sizeThin:     1.0,   // baseWidth < 1.2 的方塊邊長(px)
+  sizeThick:    1.2,   // 否則方塊邊長(px)
+  fadeFloor:    0.5,   // strokeAlpha 低於此值開始線性減顆粒(趨近空)
+  frameBudget:  6000,  // 每幀顆粒總數硬上限。perf 審查實測:energy=order=1、50 patterns 全滿時真實 peak 會打到 4200 cap(原註解「max 2572 含 headroom」為誤)→ 上調至 6000 覆蓋真實 peak,消除外圈 pattern 飢餓閃爍。實測成本 ~2.5ms/frame,仍遠低於 16.7ms。
+};
+
+// 每幀顆粒預算(loop 開頭歸零)。模組級,避免每幀配置。
+let sandBudgetLeft = SAND.frameBudget;
+
+// 專用 RNG:不污染、不依賴 entropy()/Math.random 的視覺一致性。
+// 每幀以 frame seed 重置,讓同一路徑在連續幀的顆粒「站著呼吸」而非每幀亂跳重灑。
+let _sandSeed = 0x2f6e2b1;
+function sandReseed(s) { _sandSeed = (s | 0) || 0x2f6e2b1; }
+function sandRnd() {
+  // xorshift32:快、夠亂
+  let x = _sandSeed;
+  x ^= x << 13; x ^= x >>> 17; x ^= x << 5;
+  _sandSeed = x;
+  return ((x >>> 0) / 4294967296);
+}
+// 近高斯抖動(三 uniform 平均),回傳大致 [-1,1] 的鐘形
+function sandJitter() { return (sandRnd() + sandRnd() + sandRnd() - 1.5) * 0.9; }
+
+// 從 'hsla(H, S%, L%, A)' 拆出 'H, S%, L%' 與 A(用來繼承顏色、丟棄 bake alpha)。
+// 容錯:傳入 'hsl(...)' 或非預期字串時 baseA=1、head 原樣。
+function sandSplitColor(str) {
+  const m = /^hsla?\(([^)]+)\)/.exec(str);
+  if (!m) return { head: str, baseA: 1 };
+  const p = m[1].split(',');
+  return { head: p.slice(0, 3).join(','), baseA: p.length >= 4 ? parseFloat(p[3]) : 1 };
+}
+
+// 全片元素多時的降級:把基準 spacing 依「目前活著的元素數」線性拉稀。
+// bgPatterns(≤50) + beingPatterns(≤8) ≈ 58 為 peak。元素少時用最濃 spacingMin,
+// 接近 peak 時放寬到 spacingMax,從源頭壓低顆粒總數(在 budget 之前先軟著陸)。
+function sandSpacingFor(baseWidth) {
+  const load = (bgPatterns.length + beingPatterns.length) / 50; // 0..~1.16
+  const t = Math.max(0, Math.min(1, load));
+  const dyn = SAND.spacingMin + (SAND.spacingMax - SAND.spacingMin) * t * t; // 二次:只在很滿時才明顯拉稀
+  // baseWidth 越粗,顆粒可略疏(粗線本就視覺重);越細越密以維持可見度
+  return Math.max(dyn, baseWidth * 1.3);
+}
+
+// === 核心:沿 pathPoints 沉積顆粒 ===
+// 簽名與 strokeThangka 對齊,額外吃 ctx(主圖層固定為 ctx,但保持顯式以便日後複用)。
+// 回傳實際灑出的顆粒數(供 budget 扣減 / 監看)。
+function sandstroke(c, pts, baseWidth, color, strokeAlpha) {
+  if (pts.length < 2 || strokeAlpha < 0.01) return 0;
+  if (sandBudgetLeft <= 0) return 0;
+
+  // faintnessGuard ①:傳入 alpha 低 → 線性減顆粒(densityScale),趨近空。
+  const densityScale = strokeAlpha >= SAND.fadeFloor ? 1 : (strokeAlpha / SAND.fadeFloor);
+
+  const { head, baseA } = sandSplitColor(color);
+  // faintnessGuard ②:per-grain alpha 由原描邊 alpha 推導,並 clamp,確保沉積總量 ≤ 原線。
+  const grainA = Math.min(baseA * SAND.grainAlpha, SAND.grainAlphaCap);
+  if (grainA < 0.004) return 0;
+
+  const spacing = sandSpacingFor(baseWidth);
+  const sigma   = baseWidth * SAND.sigmaScale;
+  const along   = spacing * SAND.alongScale;
+  const size    = baseWidth < 1.2 ? SAND.sizeThin : SAND.sizeThick;
+  const half    = size * 0.5;
+
+  // fillStyle 每路徑只設一次(實測 per-grain 改字串成本翻倍)
+  c.fillStyle = 'hsla(' + head + ',' + grainA.toFixed(3) + ')';
+
+  let emitted = 0;
+  // carry:跨 segment 累積的「下一顆距離」,讓顆粒沿整條路徑等弧長分佈(非每段重置)
+  let carry = sandRnd() * spacing;
+
+  for (let i = 1; i < pts.length; i++) {
+    const ax = pts[i - 1].x, ay = pts[i - 1].y;
+    let dx = pts[i].x - ax, dy = pts[i].y - ay;
+    const segLen = Math.sqrt(dx * dx + dy * dy);
+    if (segLen < 1e-4) continue;
+    const inv = 1 / segLen;
+    dx *= inv; dy *= inv;
+    const nx = -dy, ny = dx; // 單位法線
+
+    let d = carry;
+    while (d < segLen) {
+      // 降級/淡化抽稀:densityScale<1 時機率性跳過
+      if (densityScale < 1 && sandRnd() > densityScale) { d += spacing; continue; }
+      // budget 用罄:停。carry 結算讓下次(若有)銜接,但通常整幀就此打住。
+      if (sandBudgetLeft <= 0) { return emitted; }
+
+      const t   = d + sandJitter() * along;       // 沿脊線抖動
+      const off = sandJitter() * sigma;           // 橫向(法線)抖動
+      const px  = ax + dx * t + nx * off;
+      const py  = ay + dy * t + ny * off;
+      c.fillRect(px - half, py - half, size, size);
+
+      emitted++; sandBudgetLeft--;
+      d += spacing;
+    }
+    carry = d - segLen;
+  }
+  return emitted;
+}
+
+// === 改寫後的 strokeThangka ===
+// 保留 embed 底層(唐卡嵌邊原則 + 顆粒的著落底);主描邊 → sandstroke 顆粒。
+// 簽名完全不變,所有現有 call site 不需改。
 function strokeThangka(pathPoints, baseWidth, color, alpha, embedColor) {
   if (pathPoints.length < 2 || alpha < 0.005) return;
 
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
 
-  // Principle 2: Embedded edge — wider, dimmer base layer
-  // P2-22: embed layer uses quadraticCurveTo for smoother curves (no breathing needed here)
+  // 原則二:嵌邊 — 較寬、較暗的底層(保留,quadraticCurveTo 平滑)
   if (embedColor) {
     ctx.lineWidth = baseWidth + 0.5;
     ctx.strokeStyle = embedColor;
@@ -241,9 +443,8 @@ function strokeThangka(pathPoints, baseWidth, color, alpha, embedColor) {
     ctx.moveTo(pathPoints[0].x, pathPoints[0].y);
     for (let i = 1; i < pathPoints.length; i++) {
       if (i < pathPoints.length - 1) {
-        // Smooth curve through midpoints
-        const mx = (pathPoints[i].x + pathPoints[i+1].x) / 2;
-        const my = (pathPoints[i].y + pathPoints[i+1].y) / 2;
+        const mx = (pathPoints[i].x + pathPoints[i + 1].x) / 2;
+        const my = (pathPoints[i].y + pathPoints[i + 1].y) / 2;
         ctx.quadraticCurveTo(pathPoints[i].x, pathPoints[i].y, mx, my);
       } else {
         ctx.lineTo(pathPoints[i].x, pathPoints[i].y);
@@ -252,22 +453,8 @@ function strokeThangka(pathPoints, baseWidth, color, alpha, embedColor) {
     ctx.stroke();
   }
 
-  // Principle 1: Breathing micro-variation (P0-2: batch every 4 segments)
-  const breathAmp = baseWidth * 0.025;
-  const totalLen = pathPoints.length;
-  const breathFreq = Math.PI * 2 / Math.max(totalLen / 2, 4); // ~2 waves per path
-  const batchSize = 4;
-
-  ctx.strokeStyle = color;
-  for (let i = 1; i < pathPoints.length; i += batchSize) {
-    const breathOffset = Math.sin(i * breathFreq) * breathAmp;
-    ctx.lineWidth = baseWidth + breathOffset;
-    ctx.beginPath();
-    ctx.moveTo(pathPoints[i - 1].x, pathPoints[i - 1].y);
-    const end = Math.min(i + batchSize, pathPoints.length);
-    for (let j = i; j < end; j++) ctx.lineTo(pathPoints[j].x, pathPoints[j].y);
-    ctx.stroke();
-  }
+  // 原則一(取代版):主描邊 = 沉積顆粒,而非 breathing 等寬線。
+  sandstroke(ctx, pathPoints, baseWidth, color, alpha);
 }
 
 // Principle 3: Gold with angle-dependent tone
@@ -362,7 +549,147 @@ function drawCoreGrid() {
       coreCtx.stroke();
     }
   }
+  drawMandalaSkeleton();   // ← 新增:壇城骨架升級(在既有 grid 之後、同一 save/restore 內)
   coreCtx.restore();
+  // FAUX-BLOOM: core skeleton repainted → its warm-gold glow cache is stale.
+  // bakeCoreGlow is lazy (buildBloom rebakes only when this flag is set).
+  coreGlowDirty = true;
+}
+
+// ============================================================
+//  壇城骨架升級 (維度二:法像真實性)
+//  方形宮殿 corner-brackets + n 重旋轉對稱星形母題。
+//  Zhang & Zhang《Parametric Modeling ... Mandala Thangka》§2A。
+//  純幾何、用既有 goldTone、加進 drawCoreGrid(只在 resize 畫一次)。
+//  ★ RESTRAINT:faint + incomplete + 可在真空隨 core 層退場。
+//  概念專家鐵律:暗示神聖結構,不可畫成完整裝飾性曼陀羅。
+// ============================================================
+
+// --- 可調旋鈕(集中,現場/微調用)---
+const MANDALA = {
+  enabled:        true,   // ← 一鍵關掉「整個壇城骨架升級」層(回到原 grid)
+
+  // 星形母題(n 重旋轉對稱:n 個內接等腰三角,尖朝外、底以連接弧相接)
+  starEnabled:    true,
+  starRings:      1,      // 畫幾「圈」星(每圈一個 n、一組半徑)。1=最克制;>1 漸吵
+  starN:          [8],    // 各圈的 n(尖角數)。預設 8;可給 [4]、[8] 或多圈 [8,16]
+                          //   16 故意不設預設——畫滿 16 會逼近完整曼陀羅(背叛 austerity)
+  starKeep:       0.58,   // incomplete:保留多少比例的尖角(0.58→n=8 時留 5 角)。1=完整(別)
+  starTipR:       [0.45], // 各圈尖端半徑(相對 R)。挑在既有同心圓「之間」避免疊線
+  starBaseR:      [0.30], // 各圈基底半徑(相對 R)。tipR>baseR(尖朝外)
+  starBaseFrac:   0.82,   // 基底角寬 = (2π/n)*starBaseFrac;~0.82→相鄰底幾乎相接但留縫
+  starAlpha:      0.07,   // ≤ 既有 grid。再被 coreCanvas 呼吸 opacity 二次壓暗
+  starConnect:    true,   // 相鄰「都存在」的尖角之間,沿 baseR 畫淺連接弧(壇城蓮座感)
+  starConnectA:   0.05,   // 連接弧 alpha(更淡)
+
+  // 方形宮殿(rotated square 的「角」,套在同心圓內;只畫角括號,永不連成整邊)
+  palaceEnabled:  true,
+  palaceRings:    1,      // 畫幾圈宮殿。1=最克制
+  palaceR:        [0.40], // 各圈宮殿外接半徑(相對 R)。方形四角落在此半徑
+  palaceRot:      [0.7854],// 各圈旋轉(rad)。π/4 → 角朝對角線,與正交十字/輻射錯開
+  palaceKeep:     0.78,   // incomplete:保留多少比例的角(0.78→4 角留 3,掉一角)
+  palaceBracket:  0.26,   // 角括號沿每條邊延伸的比例(0.26→只佔邊長 1/4,讀作「角」)
+  palaceAlpha:    0.06,   // ≤ 既有 grid,且比星形更淡(宮殿是更安靜的底層暗示)
+
+  bakeGlow:       false,  // ← 預設 false:新幾何夠淡、不需 bloom 的暖金 halo(見 risks/glow)
+                          //   設 true 才把宮殿環納入 bakeCoreGlow(仍 faint)。星形永不入 glow
+};
+
+// 確定性「這個位置畫不畫」決定子:黃金比低差異序列。
+// 為何不用 Math.random:靜態繪製(resize 才跑)要可重現、且不污染 entropy/sand RNG 的視覺。
+// 黃金比序列散佈極均勻 → gap 不群聚,壞掉的對稱「均勻地不完整」而非一坨缺一塊。
+function mandalaPresent(i, keepFrac) {
+  if (keepFrac >= 1) return true;
+  if (keepFrac <= 0) return false;
+  return ((i * 0.6180339887498949) % 1) < keepFrac;
+}
+
+// === 星形母題:一圈 n 重旋轉對稱等腰三角(尖朝外,底以連接弧相接,且 incomplete)===
+// 畫在 coreCtx(已 setTransform(dpr) 過)。用 goldTone 維持角度相關金色一致性。
+function drawStarMotif(ring) {
+  const n      = MANDALA.starN[ring] || MANDALA.starN[0] || 8;
+  const tipR   = R * (MANDALA.starTipR[ring]  ?? MANDALA.starTipR[0]  ?? 0.45);
+  const baseR  = R * (MANDALA.starBaseR[ring] ?? MANDALA.starBaseR[0] ?? 0.30);
+  const half   = (Math.PI * 2 / n) * MANDALA.starBaseFrac * 0.5; // 基底半角
+  const TAU    = Math.PI * 2;
+
+  // 先算每個尖角的「存在與否」,連接弧才知道相鄰是否都在
+  const presentArr = new Array(n);
+  for (let k = 0; k < n; k++) presentArr[k] = mandalaPresent(k, MANDALA.starKeep);
+
+  coreCtx.lineWidth = 0.5;
+  for (let k = 0; k < n; k++) {
+    if (!presentArr[k]) continue;
+    const a   = k * TAU / n;                    // 尖角所在方位(無 phase:對齊輻射骨架)
+    const tip = { x: CX + Math.cos(a) * tipR,       y: CY + Math.sin(a) * tipR };
+    const bL  = { x: CX + Math.cos(a - half) * baseR, y: CY + Math.sin(a - half) * baseR };
+    const bR  = { x: CX + Math.cos(a + half) * baseR, y: CY + Math.sin(a + half) * baseR };
+    // 等腰三角的兩斜邊(底邊由連接弧代勞;不畫底邊本身→更輕、更「壇座」)
+    // 用 goldTone(以三角朝向 a 取色)維持與既有 grid 同一金色語彙
+    coreCtx.strokeStyle = goldTone(a, MANDALA.starAlpha);
+    coreCtx.beginPath();
+    coreCtx.moveTo(bL.x, bL.y);
+    coreCtx.lineTo(tip.x, tip.y);
+    coreCtx.lineTo(bR.x, bR.y);
+    coreCtx.stroke();
+  }
+
+  // 基底連接弧:沿 baseR,連「相鄰兩尖角都存在」者的相鄰底角。淺弧,壇城蓮座/連續性暗示。
+  if (MANDALA.starConnect) {
+    coreCtx.lineWidth = 0.4;
+    for (let k = 0; k < n; k++) {
+      const kNext = (k + 1) % n;
+      if (!presentArr[k] || !presentArr[kNext]) continue;   // 任一缺 → 留缺口(incomplete)
+      const aR = k * TAU / n + half;          // 本三角的右底角
+      const aL = kNext * TAU / n - half;       // 下一三角的左底角
+      // 跨越 k→k+1 接縫時 aL 可能 < aR;arc 用實際角度,範圍很小(底幾乎相接)
+      const mid = (k + 0.5) * TAU / n;
+      coreCtx.strokeStyle = goldTone(mid, MANDALA.starConnectA);
+      coreCtx.beginPath();
+      coreCtx.arc(CX, CY, baseR, aR, aL + (aL < aR ? TAU : 0));
+      coreCtx.stroke();
+    }
+  }
+}
+
+// === 方形宮殿:rotated square 的「角括號」(只畫角,永不連成整邊;且 incomplete)===
+function drawPalace(ring) {
+  const pr  = R * (MANDALA.palaceR[ring]   ?? MANDALA.palaceR[0]   ?? 0.40);
+  const rot = (MANDALA.palaceRot[ring] ?? MANDALA.palaceRot[0] ?? Math.PI / 4);
+  const frac = MANDALA.palaceBracket;
+
+  coreCtx.lineWidth = 0.5;
+  for (let i = 0; i < 4; i++) {
+    if (!mandalaPresent(i, MANDALA.palaceKeep)) continue;  // 掉角 → incomplete
+    const aC = rot + i * Math.PI / 2;            // 本角方位
+    const aN = rot + (i + 1) * Math.PI / 2;      // 下一角
+    const aP = rot + (i - 1) * Math.PI / 2;      // 上一角
+    const c  = { x: CX + Math.cos(aC) * pr, y: CY + Math.sin(aC) * pr };
+    const nx = { x: CX + Math.cos(aN) * pr, y: CY + Math.sin(aN) * pr };
+    const pv = { x: CX + Math.cos(aP) * pr, y: CY + Math.sin(aP) * pr };
+    // 角括號:從角往兩鄰角各走 frac(直線弦,非弧)→ 銳利「方形」感,與圓形母題對比
+    const toN = { x: c.x + (nx.x - c.x) * frac, y: c.y + (nx.y - c.y) * frac };
+    const toP = { x: c.x + (pv.x - c.x) * frac, y: c.y + (pv.y - c.y) * frac };
+    coreCtx.strokeStyle = goldTone(aC, MANDALA.palaceAlpha);  // goldTone 維持一致金色
+    coreCtx.beginPath();
+    coreCtx.moveTo(toP.x, toP.y);
+    coreCtx.lineTo(c.x, c.y);
+    coreCtx.lineTo(toN.x, toN.y);
+    coreCtx.stroke();
+  }
+}
+
+// === 入口:由 drawCoreGrid 在既有層之後呼叫一次 ===
+function drawMandalaSkeleton() {
+  if (!MANDALA.enabled) return;
+  coreCtx.lineCap = 'round';
+  coreCtx.lineJoin = 'round';
+  if (MANDALA.palaceEnabled) {
+    for (let r = 0; r < MANDALA.palaceRings; r++) drawPalace(r);
+  }
+  if (MANDALA.starEnabled) {
+    for (let r = 0; r < MANDALA.starRings; r++) drawStarMotif(r);
+  }
 }
 
 // [Fix #8] Core breath CSS: 0.5 + sin * 0.35
@@ -1186,8 +1513,372 @@ function drawBN() {
   ctx.fill();
 }
 
+// ============================================================
+//  2D FAUX-BLOOM  (維度一:halo — 光擴散進黑)
+//  純 2D,零相依。只暈「該發光者」:暖金核心骨架 / 佛性金點 /
+//  較亮的 being+pattern。疊回用 'lighter' 低 alpha;真空歸零。
+//  研究 §1A/§8:純黑底上感知 ≈ WebGL HDR bloom。
+// ============================================================
+
+// ---- 設定(全部可調,已給 modest 硬體預算)----
+const BLOOM = {
+  DOWNSCALE: 6,          // glow buffer = CSS 尺寸 / 6(介於研究建議 4–8)
+  BLUR_PX: 7,            // 在「降採樣後」座標系的模糊半徑(等效全解析 ~42px halo)
+  MAX_ALPHA: 0.22,       // 疊回 'lighter' 的 alpha 上限(夠淡的天花板)
+  EVERY_N: 3,            // 每 N 幀更新一次 glow(halo 是慢訊號,不必 60Hz)
+  // glow source 取樣門檻:元素有效 alpha 低於此值就不進 glow(暗的不發光)
+  SRC_MIN_A: 0.22,
+  enabled: true,         // 偵測失敗時關閉,主畫面照常運作
+};
+
+// ---- offscreen:2 張,皆 reuse、永不每幀 new ----
+// gBuf  = glow source(低解析,畫「該發光者」)
+// gBlur = 模糊結果(疊回時的來源;與 gBuf 分開,避免 in-place filter 自取樣)
+// coreGlow = 預烤的「核心骨架暖金」全解析快取(只在 resize/core redraw 時重畫)
+let gBuf, gBufCtx, gBlur, gBlurCtx, coreGlow, coreGlowCtx;
+let gW = 0, gH = 0;          // glow buffer 像素尺寸
+let bloomFrame = 0;
+let coreGlowDirty = true;    // resize 或 core 重畫後置 true
+
+function initBloom() {
+  // 能力偵測:filter blur 屬性存在即可;不存在就靠 downsample 雙線性當柔光。
+  const probe = document.createElement('canvas').getContext('2d');
+  if (!probe) { BLOOM.enabled = false; return; }
+  // ('filter' in probe) 在所有現代瀏覽器為 true;留 try 防呆,不崩即可。
+
+  gBuf  = document.createElement('canvas');
+  gBlur = document.createElement('canvas');
+  coreGlow = document.createElement('canvas');
+  gBufCtx   = gBuf.getContext('2d');
+  gBlurCtx  = gBlur.getContext('2d');
+  coreGlowCtx = coreGlow.getContext('2d');
+  resizeBloom();
+}
+
+// 在主 resize() 之後呼叫:依 CSS 尺寸(非 backing-store)算 glow buffer。
+// glow 用 CSS 尺寸 / DOWNSCALE,刻意忽略 dpr —— halo 要被糊掉,不需要 HiDPI。
+function resizeBloom() {
+  if (!BLOOM.enabled) return;
+  gW = Math.max(1, Math.round(W / BLOOM.DOWNSCALE));
+  gH = Math.max(1, Math.round(H / BLOOM.DOWNSCALE));
+  if (gBuf.width !== gW || gBuf.height !== gH) {
+    gBuf.width = gW;   gBuf.height = gH;
+    gBlur.width = gW;  gBlur.height = gH;
+  }
+  // coreGlow 用 CSS 尺寸即可(它會被縮進 gBuf,不需 backing-store 解析)
+  if (coreGlow.width !== W || coreGlow.height !== H) {
+    coreGlow.width = W; coreGlow.height = H;
+  }
+  coreGlowDirty = true;
+}
+
+// 預烤「核心骨架的暖金發光部分」到 coreGlow(全 CSS 解析,但只在變動時重畫)。
+// 只取暖金(同心環 + 輻射 + 十字),省略 0.07 比例弧那種太淡的——它們不該發光。
+// 用實心、略高 alpha 的金(因為等下會被縮小+模糊+低 alpha 疊回,這裡是「種子亮度」)。
+function bakeCoreGlow() {
+  if (!BLOOM.enabled) return;
+  const c = coreGlowCtx;
+  c.setTransform(1, 0, 0, 1, 0, 0);
+  c.clearRect(0, 0, W, H);
+  c.lineCap = 'round';
+  c.strokeStyle = 'hsla(44, 80%, 55%, 0.9)'; // 暖金種子(疊回時會被 alpha 壓很淡)
+  // 同心環
+  c.lineWidth = 1.2;
+  let cr = R * 0.05;
+  while (cr < R) {
+    c.beginPath();
+    c.arc(CX, CY, cr, 0, Math.PI * 2);
+    c.stroke();
+    cr *= 1.5;
+  }
+  // 16 輻射
+  c.lineWidth = 1.0;
+  for (let i = 0; i < 16; i++) {
+    const a = (i / 16) * Math.PI * 2;
+    c.beginPath();
+    c.moveTo(CX, CY);
+    c.lineTo(CX + Math.cos(a) * R * 0.95, CY + Math.sin(a) * R * 0.95);
+    c.stroke();
+  }
+  // 十字(略亮)
+  c.lineWidth = 1.4;
+  c.beginPath();
+  c.moveTo(CX - R * 0.95, CY); c.lineTo(CX + R * 0.95, CY);
+  c.moveTo(CX, CY - R * 0.95); c.lineTo(CX, CY + R * 0.95);
+  c.stroke();
+  coreGlowDirty = false;
+}
+
+// 每幀(或每 N 幀)重建 glow source 並模糊。bAlpha = 當前 breathAlpha。
+// 回傳是否成功產生可疊回的 glow(供 loop 決定要不要 composite)。
+function buildBloom(bAlpha) {
+  if (!BLOOM.enabled) return false;
+  if (coreGlowDirty) bakeCoreGlow();
+
+  const g = gBufCtx;
+  // 1) 清 glow source。重點:這裡是黑底,只畫「該發光者」。
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  g.clearRect(0, 0, gW, gH);
+  // glow source 內部用 'lighter' 讓多個發光者自然累加(只在這張小 buffer 內,不影響主畫面)
+  g.globalCompositeOperation = 'lighter';
+
+  // 1a) 核心骨架:把預烤的 coreGlow 縮進 glow buffer(雙線性即第一層柔化)。
+  //     核心骨架的「發光感」也隨呼吸:用 bAlpha 當權重,但給個地板 0.35
+  //     —— 即使 LIVING 谷底,骨架仍是作品的恆在脈絡(core CSS opacity 本就 0.15–0.85)。
+  g.imageSmoothingEnabled = true;
+  g.globalAlpha = 0.5 * (0.35 + 0.65 * bAlpha);
+  g.drawImage(coreGlow, 0, 0, W, H, 0, 0, gW, gH);
+
+  // 座標轉換:主畫面世界座標 → glow buffer 座標(/ DOWNSCALE)。
+  const s = 1 / BLOOM.DOWNSCALE;
+
+  // 1b) 較亮的 being / pattern:只取有效 alpha ≥ SRC_MIN_A 的,粗略重畫成短弧。
+  //     不跑 strokeThangka(breathing/embed 對被糊掉的東西毫無意義)。只要形狀+亮度。
+  g.lineCap = 'round';
+  _bloomStampList(beingPatterns, g, s, bAlpha, true);
+  _bloomStampList(bgPatterns,    g, s, bAlpha, false);
+
+  // 1c) 佛性金點:作品的「心」,一定進 glow(這是 halo 最該服務的對象,但要最淡)。
+  //     用一個比實體點略大的金圓當種子,讓它在黑裡有一圈勉強可感的氣息。
+  if (typeof bnRealX === 'number' && bnVisible) {
+    g.globalAlpha = 0.6 * bAlpha;
+    g.fillStyle = 'hsla(44, 80%, 60%, 1)';
+    g.beginPath();
+    g.arc(bnRealX * s, bnRealY * s, Math.max(1.2, (BN_SIZE * 1.6) * s), 0, Math.PI * 2);
+    g.fill();
+  }
+
+  g.globalAlpha = 1;
+  g.globalCompositeOperation = 'source-over';
+
+  // 2) 模糊:gBuf → gBlur,用 GPU filter。gBlur 與 gBuf 分離,避免 in-place 自取樣。
+  const b = gBlurCtx;
+  b.setTransform(1, 0, 0, 1, 0, 0);
+  b.clearRect(0, 0, gW, gH);
+  try {
+    b.filter = `blur(${BLOOM.BLUR_PX}px)`;
+  } catch (e) {
+    b.filter = 'none'; // 不支援就靠 downsample 的雙線性,仍是柔光
+  }
+  b.drawImage(gBuf, 0, 0);
+  b.filter = 'none';
+  return true;
+}
+
+// 把一個 pattern/being list 的「夠亮者」粗略蓋進 glow buffer。
+function _bloomStampList(list, g, s, bAlpha, isBeing) {
+  for (let i = 0; i < list.length; i++) {
+    const p = list[i];
+    // 有效亮度:沿用各自 render 的乘法鏈近似(p.alpha·breathAlpha)。
+    const eff = p.alpha * bAlpha;
+    if (eff < BLOOM.SRC_MIN_A) continue;          // 暗的不發光
+    // 只暖色系發光感最強;冷色給較低權重(避免整畫面都暈)。
+    const warm = (p.colorKey === 'gold' || p.colorKey === 'vermilion' ||
+                  p.colorKey === 'warmWhite');
+    g.globalAlpha = (warm ? 0.6 : 0.3) * (eff - BLOOM.SRC_MIN_A) / (1 - BLOOM.SRC_MIN_A);
+    if (g.globalAlpha < 0.01) continue;
+    g.strokeStyle = warm ? 'hsla(44,80%,58%,1)' : 'hsla(200,40%,60%,1)';
+    g.lineWidth = Math.max(1, (p.lineWidth || 1) * (isBeing ? 1.4 : 1.0) * s * BLOOM.DOWNSCALE * 0.35);
+    // 粗略主弧:不重建 petal/child/spiral 細節,只畫骨幹弧(被糊掉,形狀足矣)
+    const span = (p.type === 'spiral')
+      ? (p.spiralTurns || 1.5) * Math.PI * 0.5
+      : (p.arcSpan || 0.4);
+    const a0 = p.theta - span / 2, a1 = p.theta + span / 2;
+    g.beginPath();
+    g.arc(CX * s, CY * s, p.r * s, a0, a1);
+    g.stroke();
+  }
+  g.globalAlpha = 1;
+}
+
+// 疊回主畫面。在 main ctx 已是 setTransform(dpr,...) 的座標系下呼叫。
+// bAlpha 驅動強度;真空/SILENCE 由 loop 在呼叫前 gate 掉,不會進到這裡。
+function compositeBloom(bAlpha) {
+  if (!BLOOM.enabled) return;
+  const a = Math.min(BLOOM.MAX_ALPHA, BLOOM.MAX_ALPHA * bAlpha);
+  if (a < 0.004) return;                          // 夠淡判準:低於此不值得畫
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';       // halo 加進黑,不擋住線
+  ctx.globalAlpha = a;
+  ctx.imageSmoothingEnabled = true;
+  // gBlur(gW×gH)放大鋪滿 CSS 尺寸(W×H);ctx 已含 dpr scale,座標用 CSS 尺寸即可。
+  ctx.drawImage(gBlur, 0, 0, gW, gH, 0, 0, W, H);
+  ctx.restore();
+}
+
+// ============================================================
+//  絹本/棉布底材 (維度一:給黑一個身體)
+//  純 2D、零相依。預烤一張 seamless 織紋 → 一次性鋪滿全螢幕
+//  static canvas;之後每幀只動 CSS opacity(GPU compositor,零 JS)。
+//  抬黑零容忍:tile 平均灰 ~9/255、CSS opacity 0.16 → 實測平均
+//  抬升 1.44/255(< 鐵律 2/255)。真空時 opacity→0(身體退場)。
+//  研究 §8 CODE③:「給黑一個身體;僅限勉強可感 且 真空歸零」。
+// ============================================================
+
+// ---- 可調旋鈕(集中,現場/微調用)----
+const SUBSTRATE = {
+  enabled:      true,   // ★ 底材總開關。false = 完全不建 canvas、不掛 DOM(回到死黑)
+  intensity:    0.16,   // ★ 強度主旋鈕 = canvas CSS opacity 上限。
+                        //    實測:0.16→平均抬升1.44/255;0.22 為硬天花板(平均1.98/255)。
+                        //    範圍守則:勿超過 0.22(否則平均抬黑 >2/255 = 違反鐵律)。
+  tile:         256,    // 預烤 tile 邊長(px)。seamless;256 在 2m 投影看不出週期。
+  meanL:        9,      // tile 平均灰(0..255)。烤進像素的「底」,刻意壓在近黑帶。
+  weaveAmp:     5,      // 經緯亮度擾動振幅(±, 0..255)。tooth 不是 floor:trough 趨近 0。
+  warpFreq:     5.0,    // 經線(直)空間頻率(每 tile 週期數)。整數→seamless。密。
+  weftFreq:     3.0,    // 緯線(橫)空間頻率(每 tile 週期數)。整數→seamless。疏。
+  warpWeight:   0.62,   // 經線權重(上膠平織:經密緯疏 → 經略重)
+  fiberAmp:     3.0,    // 纖維 value-noise 微粒振幅(±, 0..255)。各向同性「棉絮」感
+  fiberFreq:    48,     // 纖維噪聲格數(每 tile)。越大越細。
+  hue:          38,     // 極微暖(棉/絹的米白底,非冷灰)。s 很低、l 由像素值決定。
+  sat:          12,     // 飽和度(%)。低 → 幾乎無彩,只給一點點暖。
+  dyingFollow:  true,   // DYING 時底材是否跟 breathAlpha 一起 fade(身體先於線退場感)
+};
+
+// substrate canvas 與其 ctx(全螢幕 static;烤一次,之後只動 style.opacity)
+let substrateCanvas = null, substrateCtx = null;
+let _substrateW = 0, _substrateH = 0;   // 已烤的 CSS 尺寸(同尺寸不重烤 guard)
+
+// --- 程序生成一張 seamless 織紋 tile,回傳一個 (tile×tile) 的 offscreen canvas ---
+// 純 CPU、一次性。經緯 = 正交低頻 sin(整數頻率保證 wrap 無縫);
+// 纖維 = 雙線性插值的 value-noise(可 wrap 的整數格點)。輸出像素值刻意低(近黑)。
+function _bakeSubstrateTile() {
+  const N = SUBSTRATE.tile;
+  const tc = document.createElement('canvas');
+  tc.width = N; tc.height = N;
+  const tctx = tc.getContext('2d');
+  const img = tctx.createImageData(N, N);
+  const d = img.data;
+
+  // 1) 預生 value-noise 格點(可 wrap:用 (i % G) 取點 → 邊界自動接回)。
+  const G = SUBSTRATE.fiberFreq;                 // 噪聲格數
+  const grid = new Float32Array(G * G);
+  for (let i = 0; i < grid.length; i++) {
+    // 三 uniform 平均 → 近高斯,避免噪聲過硬
+    grid[i] = (Math.random() + Math.random() + Math.random()) / 3; // 0..1, mean .5
+  }
+  const sampleNoise = (u, v) => {                // u,v in [0,1)，可 wrap 雙線性
+    const fx = u * G, fy = v * G;
+    const x0 = Math.floor(fx) % G, y0 = Math.floor(fy) % G;
+    const x1 = (x0 + 1) % G,       y1 = (y0 + 1) % G;
+    const tx = fx - Math.floor(fx), ty = fy - Math.floor(fy);
+    const a = grid[y0 * G + x0], b = grid[y0 * G + x1];
+    const c = grid[y1 * G + x0], e = grid[y1 * G + x1];
+    const top = a + (b - a) * tx, bot = c + (e - c) * tx;
+    return top + (bot - top) * ty;               // 0..1
+  };
+
+  const TWO_PI = Math.PI * 2;
+  const wF = SUBSTRATE.warpFreq, ftF = SUBSTRATE.weftFreq;
+  const wW = SUBSTRATE.warpWeight, ftW = 1 - SUBSTRATE.warpWeight;
+
+  // 預算 hue/sat → 由像素亮度 L 決定每像素 RGB(同色相、亮度起伏 = 織紋)。
+  // 直接用 HSL→RGB 一次(同 hue/sat),只有 L 變,所以可逐像素算 L 後轉。
+  const hue = SUBSTRATE.hue, sat = SUBSTRATE.sat / 100;
+
+  for (let y = 0; y < N; y++) {
+    const v = y / N;
+    for (let x = 0; x < N; x++) {
+      const u = x / N;
+      // 經緯:正交 sin（整數頻率 → x=0 與 x=N 同相位 → 無縫)
+      const warp = Math.sin(u * TWO_PI * wF);          // 直紋 (-1..1)
+      const weft = Math.sin(v * TWO_PI * ftF);         // 橫紋 (-1..1)
+      const weave = (warp * wW + weft * ftW);          // 加權經緯 (-~1..~1)
+      // 纖維微粒(各向同性),置中到 ±1
+      const fiber = (sampleNoise(u, v) - 0.5) * 2;     // -1..1
+
+      // 像素亮度(0..255):底 meanL + 經緯擾動 + 纖維;clamp >= 0(tooth 不是 floor)
+      let L = SUBSTRATE.meanL
+            + weave * SUBSTRATE.weaveAmp
+            + fiber * SUBSTRATE.fiberAmp;
+      if (L < 0) L = 0;
+      if (L > 255) L = 255;
+
+      // HSL→RGB(極低 sat、固定 hue;L 用 0..1)
+      const Ln = L / 255;
+      const c = (1 - Math.abs(2 * Ln - 1)) * sat;
+      const hp = hue / 60;
+      const xC = c * (1 - Math.abs((hp % 2) - 1));
+      let r1 = 0, g1 = 0, b1 = 0;
+      if (hp < 1)      { r1 = c; g1 = xC; }
+      else if (hp < 2) { r1 = xC; g1 = c; }
+      else if (hp < 3) { g1 = c; b1 = xC; }
+      else if (hp < 4) { g1 = xC; b1 = c; }
+      else if (hp < 5) { r1 = xC; b1 = c; }
+      else             { r1 = c; b1 = xC; }
+      const m = Ln - c / 2;
+      const idx = (y * N + x) * 4;
+      d[idx]     = Math.round((r1 + m) * 255);
+      d[idx + 1] = Math.round((g1 + m) * 255);
+      d[idx + 2] = Math.round((b1 + m) * 255);
+      d[idx + 3] = 255;                              // 不透明;真正的「淡」靠 CSS opacity
+    }
+  }
+  tctx.putImageData(img, 0, 0);
+  return tc;
+}
+
+// --- 一次性把 tile 鋪滿全螢幕 substrate canvas(createPattern,無縫平鋪)---
+// 在 resize() 之後呼叫。同 CSS 尺寸不重烤(guard);尺寸變才重鋪。
+// 用 CSS 尺寸(非 backing-store):底材不需 HiDPI,1× 即可(更省記憶體、看不出差)。
+function bakeSubstrate() {
+  if (!SUBSTRATE.enabled || !substrateCanvas) return;
+  if (_substrateW === W && _substrateH === H && substrateCanvas.width === W) return; // guard
+  // 用 CSS 尺寸當 backing(刻意 dpr=1:織紋本就微觀,HiDPI 浪費)
+  substrateCanvas.width = W;
+  substrateCanvas.height = H;
+  const tile = _bakeSubstrateTile();
+  const pat = substrateCtx.createPattern(tile, 'repeat');
+  substrateCtx.setTransform(1, 0, 0, 1, 0, 0);
+  substrateCtx.clearRect(0, 0, W, H);
+  substrateCtx.fillStyle = pat;
+  substrateCtx.fillRect(0, 0, W, H);
+  _substrateW = W; _substrateH = H;
+  // tile canvas 在此 fn 結束後不再被參照 → GC 回收(只活在烤製當下,不洩漏)
+}
+
+// --- DOM/canvas setup:建一張 #substrate 放在最底(z-index -1,trace 之下)---
+// 在 head <style> 已宣告 #substrate { z-index:-1 } 的前提下,JS 端建立並掛載。
+function initSubstrate() {
+  if (!SUBSTRATE.enabled) return;
+  substrateCanvas = document.createElement('canvas');
+  substrateCanvas.id = 'substrate';
+  // 內聯保險(即使 <style> 沒加也能正確定位/疊層);CSS 檔內若已有則此為冗餘無害
+  substrateCanvas.style.cssText =
+    'position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:-1;' +
+    'opacity:0;pointer-events:none;';
+  // 插在 body 第一個子節點(在 #trace 之前,確保最底)
+  document.body.insertBefore(substrateCanvas, document.body.firstChild);
+  substrateCtx = substrateCanvas.getContext('2d');
+  bakeSubstrate();
+}
+
+// --- 每幀:只更新 CSS opacity(零像素操作)。讀 breath/真空狀態,絕不改它們 ---
+// 規則:
+//   true emptiness(SILENCE+isTrueEmptiness) → 0(身體完全退場 = 真空純度)
+//   SILENCE(一般靜默)                        → 0(無物之間黑回死黑)
+//   DYING                                     → 跟 breathAlpha 一起 fade(身體先退)
+//   其餘(BIRTH/LIVING)                       → intensity(滿身體;BIRTH 隨生命淡入)
+function updateSubstrate() {
+  if (!SUBSTRATE.enabled || !substrateCanvas) return;
+  let op;
+  if (breathState === BREATH.SILENCE) {
+    op = 0;                                  // 真空 + 一般靜默都歸零
+  } else if (breathState === BREATH.DYING && SUBSTRATE.dyingFollow) {
+    op = SUBSTRATE.intensity * breathAlpha;  // 身體隨死亡退場
+  } else if (breathState === BREATH.BIRTH) {
+    op = SUBSTRATE.intensity * breathAlpha;  // 隨生命淡入(breathAlpha BIRTH 期 0→1)
+  } else {
+    op = SUBSTRATE.intensity;                // LIVING:滿
+  }
+  // 只在變動夠大時寫 style(避免每幀字串化;opacity 是慢訊號)
+  const s = op.toFixed(3);
+  if (substrateCanvas.style.opacity !== s) substrateCanvas.style.opacity = s;
+}
+
 // === INIT ===
 resize(); // deferred until all functions are defined
+initBloom();      // 建 offscreen(reuse,永不每幀 new)
+initSubstrate();  // 建 #substrate(全螢幕 static,烤一次,之後只動 CSS opacity)
 beginLife();
 
 let lastTime = performance.now();
@@ -1201,6 +1892,8 @@ function loop(t) {
   updateBN(dt);
   updateCoreBreath(dt);
   updateColorMaturity(dt);
+  updatePigment(dt);     // 顏料老化漂移(只動 hue 解析狀態,不碰 field/macro)
+  updateSubstrate();     // 底材 CSS opacity(讀 breath/真空,零像素;真空時歸零)
 
   // True emptiness — clear and draw only buddha-nature glimmer
   if (breathState === BREATH.SILENCE && isTrueEmptiness) {
@@ -1215,6 +1908,15 @@ function loop(t) {
 
   fadeTrace(dt);
 
+  // SANDSTROKE: refill per-frame grain budget (only debited, never freed otherwise →
+  // without this, frame 2+ would go black). True-emptiness already returned above, so
+  // vacuum frames never reach here (auto-zero). SILENCE has breathAlpha=0 → render block
+  // skipped → sandstroke never fires (this line just resets a counter, harmless).
+  sandBudgetLeft = SAND.frameBudget;
+  // Slow-changing frame seed: grains re-arrange only every ~150ms, otherwise frozen →
+  // a faint "standing breath", not boiling noise. Vacuum-safe (no grains drawn anyway).
+  sandReseed(((t / 150) | 0) * 2654435761 >>> 0);
+
   ctx.save();
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, W, H);
@@ -1224,6 +1926,13 @@ function loop(t) {
     manageBeings(dt);
     // [Fix #36] Render all sorted by r
     renderAllPatterns();
+
+    // ---- BLOOM: rebuild glow every EVERY_N frames, composite back every frame ----
+    // (composite is one drawImage; even when build runs every 3rd frame the halo does
+    //  not flicker — it's a low-frequency signal, content just updates ~20Hz.)
+    bloomFrame++;
+    if (bloomFrame % BLOOM.EVERY_N === 0) buildBloom(breathAlpha);
+    compositeBloom(breathAlpha);
   }
 
   drawBN();
