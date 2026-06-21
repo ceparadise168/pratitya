@@ -35,12 +35,14 @@
 
 ## 3. 瀏覽器 kiosk [OPS]
 
-- [ ] Chromium 全螢幕無 UI:
-      `chromium --kiosk --noerrdialogs --disable-infobars --no-first-run --disable-session-crashed-bubble`
+- [ ] Chromium 全螢幕無 UI + **頌缽聲自動播放**:
+      `chromium --kiosk --noerrdialogs --disable-infobars --no-first-run --disable-session-crashed-bubble --autoplay-policy=no-user-gesture-required`
   - `--kiosk` 全螢幕無 chrome(無網址列/分頁)
   - `--disable-session-crashed-bubble` + `--noerrdialogs`:**斷電/crash 後不要跳「還原頁面」氣泡**污染畫面
+  - ⚠️ **`--autoplay-policy=no-user-gesture-required` 是頌缽聲在無人值守下發聲的關鍵**:瀏覽器預設擋自動播放,無此 flag 則 AudioContext 維持 suspended、永遠靜音(因為無人會點擊)。網頁(GitHub Pages)版不需此 flag——訪客點擊進全螢幕時會順帶解鎖音訊。
 - [ ] 藏滑鼠游標(`unclutter`,或 CSS `cursor:none`)。
-- [ ] 作品已有點擊全螢幕 fallback(`index.html` 末:click → requestFullscreen)——kiosk 模式下不需依賴它,但留著無害。
+- [ ] 作品已有點擊全螢幕 fallback(`index.html` 末:click → requestFullscreen + 解鎖頌缽)——kiosk 模式下不需依賴它,但留著無害。
+- [ ] **音訊輸出**:確認 kiosk 機接喇叭且音量適中(暗房冥想,缽聲宜輕、間隔 ~22s)。`BOWL.volume`(index.html 檔頭)現場可調;無喇叭/不要聲音則設 `BOWL.enabled=false`。
 
 ## 4. 自動回復(watchdog)[OPS]
 

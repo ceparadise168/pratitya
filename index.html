@@ -1988,9 +1988,207 @@ function loop(t) {
 }
 requestAnimationFrame(loop);
 
+// ============================================================
+//  頌缽 BACKGROUND AUDIO — 純新增模組(不碰任何視覺/模擬靈魂)
+//  ------------------------------------------------------------
+//  · 引擎原樣移植自 bowl-prototype.html(使用者試聽定案的音色):
+//    PARTIALS / initAudio / strike / rnd / master→compressor→warm-lowpass 鏈。
+//  · 唯一改動:strike() 不再讀 DOM slider,改讀檔頭 BOWL config 物件。
+//  · 全模組封進 IIFE → 對外只露 BowlAudio.{ unlock, tryAutostart };
+//    內部 actx/master/comp 一律 local,不污染視覺命名空間(尤其避開
+//    既有 `ctx` = 2D canvas context)。
+//  · 只「讀」 isTrueEmptiness / breathState / BREATH(外層 module 變數),
+//    絕不寫它們。真空(SILENCE+isTrueEmptiness)→ 不排新敲 + master 平滑→0。
+// ============================================================
+
+// === BOWL config(現場可調,集中,檔頭級)=========================
+//  原型定案預設值;每項都是展演現場可手調的旋鈕。
+const BOWL = {
+  enabled:    true,   // 總開關(現場可調):false → 完全不出聲、不排程、不生 oscillator。
+  volume:     0.5,    // 主音量 0..1(現場可調):展演空間音響再定。原型試聽用 0.6,現場保守起 0.5。
+  pitch:      216,    // 基頻 Hz(現場可調):缽的載音高。
+  decay:      20,     // 基頻衰減秒數(現場可調):越長尾巴越久;高階泛音按比例較短。
+  beating:    1,      // 拍頻量 ×(現場可調):0=死板,1≈真實慢顫,過大變抖音。
+  brightness: 1,      // 明亮 ×(現場可調):上階泛音量;高=金屬亮,低=溫暖悶。
+  transient:  1,      // 敲擊瞬態 ×(現場可調):起音那聲「鎚觸」的量。
+  interval:   22,     // 平均敲擊間隔秒(現場可調):實際每次 ×0.8~1.2 變異。
+};
+
+(function BowlAudioModule() {
+  // ---- 引擎狀態(全 local,不外露)----
+  let actx = null, master = null, comp = null;  // actx:避開既有 2D 的 `ctx`
+  let voidGain = null;                          // 真空 duck 專用節點(獨立於 master.gain)
+  let live = 0, strikes = 0;                     // 診斷計數(GC 健康度)
+  let cycleTimer = null;                         // 排程唯一 handle(防重複)
+  let voidPollTimer = null;                      // 真空 duck 即時輪詢 handle(讓 audio void 緊跟視覺 void)
+  let started = false;                           // startCycle 冪等旗標
+  let ducked = false;                            // 真空靜音狀態(避免重複 ramp)
+
+  // ---- 泛音模態表(原樣移植:量測非諧比 + 非單調振幅 + 差異衰減 + 裂模幅)----
+  // ratio(對基頻), amp(線性), decayScale(相對,高頻較短), split(裂模幅 fraction)
+  const PARTIALS = [
+    { r: 1.00,  a: 1.00, d: 1.00, s: 0.0040 },  // (2,0) 載音高
+    { r: 2.70,  a: 0.12, d: 0.66, s: 0.0060 },  // (3,0)  ← 第2泛音常最弱(非單調)
+    { r: 4.80,  a: 0.17, d: 0.46, s: 0.0080 },  // (4,0)
+    { r: 7.50,  a: 0.15, d: 0.34, s: 0.0050 },  // (5,0)
+    { r: 10.70, a: 0.22, d: 0.24, s: 0.0095 },  // (6,0) ← 反而較強
+    { r: 14.20, a: 0.10, d: 0.17, s: 0.0120 },  // (7,0) 上階跨缽差大→可變異
+    { r: 18.20, a: 0.05, d: 0.13, s: 0.0070 },  // (8,0)
+  ];
+
+  const rnd = (a, b) => a + Math.random() * (b - a);
+
+  function initAudio() {
+    if (actx) return;
+    actx = new (window.AudioContext || window.webkitAudioContext)();
+    master = actx.createGain();
+    // 真空 duck:獨立節點(原型沒有)。strike() 仍照原型寫 master.gain=level,
+    // 兩個控制器各管各的 AudioParam,不互搶。預設 1(透通)。
+    voidGain = actx.createGain();
+    voidGain.gain.value = 1;
+    comp = actx.createDynamicsCompressor();           // 安全限幅,防泛音疊加破音
+    comp.threshold.value = -10; comp.knee.value = 20; comp.ratio.value = 6;
+    const warm = actx.createBiquadFilter();           // 輕微低通,去數位正弦的硬邊
+    warm.type = 'lowpass'; warm.frequency.value = 8200; warm.Q.value = 0.4;
+    master.connect(voidGain); voidGain.connect(warm); warm.connect(comp); comp.connect(actx.destination);
+  }
+
+  // strike():原樣移植,唯「讀 slider」→「讀 BOWL」。變異(per-strike jitter)
+  // 對應原型「每敲微變異」勾選的預設 = 恆開(生成作品「從不重複」的 feature)。
+  function strike() {
+    if (!actx || actx.state !== 'running') return;     // 只在已解鎖且 running 才出聲
+    const t = actx.currentTime + 0.02;
+
+    const f0 = BOWL.pitch * rnd(0.99, 1.01);           // 微 pitch 變異
+    const decay = BOWL.decay * rnd(0.9, 1.1);          // 微衰減變異
+    const beatAmt = BOWL.beating;
+    const bright = BOWL.brightness;
+    const transAmt = BOWL.transient;
+    const level = BOWL.volume;
+    master.gain.setTargetAtTime(level, actx.currentTime, 0.01);
+
+    // --- 敲擊瞬態:短促濾波雜訊 burst(§5,憑耳朵)---
+    if (transAmt > 0.001) {
+      const dur = 0.13;
+      const buf = actx.createBuffer(1, Math.ceil(actx.sampleRate * dur), actx.sampleRate);
+      const dd = buf.getChannelData(0);
+      for (let i = 0; i < dd.length; i++) dd[i] = (Math.random()*2-1) * Math.pow(1 - i/dd.length, 3);
+      const src = actx.createBufferSource(); src.buffer = buf;
+      const bp = actx.createBiquadFilter(); bp.type = 'bandpass';
+      bp.frequency.value = f0 * 5.5; bp.Q.value = 0.6;
+      const ng = actx.createGain(); ng.gain.value = 0.05 * transAmt * level;
+      src.connect(bp); bp.connect(ng); ng.connect(master);
+      src.start(t); src.stop(t + dur);
+      // 瞬態 source 同樣斷開 GC(原型靠 stop 自然回收;這裡顯式 disconnect 防 24/7 累積)
+      src.onended = () => { try { src.disconnect(); bp.disconnect(); ng.disconnect(); } catch(e){} };
+    }
+
+    // --- 泛音:每階一對 detune 雙生(A/B 家族)→ 拍頻 ---
+    for (const p of PARTIALS) {
+      const jitter = (p.r > 3) ? rnd(0.97, 1.03) : 1;   // 上階泛音比可變異
+      const baseF = f0 * p.r * jitter;
+      const tau = Math.max(0.25, decay * p.d);
+      const tilt = p.r > 1 ? Math.pow(bright, Math.min(2, p.r / 4)) : 1;  // brightness 偏上階
+      const split = p.s * beatAmt * rnd(0.7, 1.3);
+      const twins = [
+        { f: baseF,             g: 0.62 },
+        { f: baseF * (1+split), g: 0.40 },   // 雙生略低 → 自然拍感
+      ];
+      for (const tw of twins) {
+        const amp = p.a * tilt * tw.g * 0.9;
+        if (amp < 0.0008) continue;
+        const osc = actx.createOscillator(); osc.type = 'sine'; osc.frequency.value = tw.f;
+        const g = actx.createGain();
+        g.gain.setValueAtTime(0, t);
+        g.gain.linearRampToValueAtTime(amp, t + 0.004);              // ~4ms attack 防 click
+        g.gain.exponentialRampToValueAtTime(0.0001, t + tau);       // 指數衰減
+        osc.connect(g); g.connect(master);
+        osc.start(t); osc.stop(t + tau + 0.05);
+        live++;
+        osc.onended = () => { live--; try { g.disconnect(); osc.disconnect(); } catch(e){} };
+      }
+    }
+    strikes++;
+  }
+
+  // --- 真空靜音 gate:只「讀」 isTrueEmptiness / breathState,不改 ---
+  //  真空(SILENCE 且 isTrueEmptiness)→ master ~2s 平滑→0;離開 → 還原。
+  //  in-flight 的 ring 不硬切,duck 自然帶它到無聲。回 1 也用 ~1.2s ramp,避免突起。
+  function inVoid() { return isTrueEmptiness && breathState === BREATH.SILENCE; }
+  function applyVoidGate() {
+    if (!actx || !voidGain) return;
+    const now = actx.currentTime;
+    if (inVoid() && !ducked) {
+      ducked = true;
+      voidGain.gain.cancelScheduledValues(now);
+      voidGain.gain.setTargetAtTime(0, now, 0.7);     // ~2s 內近乎到 0(時間常數 0.7s)
+    } else if (!inVoid() && ducked) {
+      ducked = false;
+      voidGain.gain.cancelScheduledValues(now);
+      voidGain.gain.setTargetAtTime(1, now, 0.4);     // ~1.2s 還原
+    }
+  }
+
+  // --- 無限脈動排程:單一 setTimeout handle;真空時不排新敲(自然沉默)---
+  function scheduleNextStrike() {
+    clearTimeout(cycleTimer);                          // 永遠先清,保證唯一 handle
+    if (!BOWL.enabled || !actx || actx.state !== 'running') { cycleTimer = null; return; }
+    const wait = BOWL.interval * 1000 * rnd(0.8, 1.2); // 平均 interval 秒,±20% 變異
+    cycleTimer = setTimeout(() => {
+      applyVoidGate();              // 進/出真空都在這裡同步 duck(不依賴視覺迴圈)
+      if (!inVoid()) strike();      // 真空時:不敲(但仍排下一次去輪詢何時離開真空)
+      scheduleNextStrike();
+    }, wait);
+  }
+
+  // startCycle:冪等。只在 actx 確實 running 後啟動排程(suspended 時不空排)。
+  function startCycle() {
+    if (started || !BOWL.enabled) return;
+    if (!actx || actx.state !== 'running') return;
+    started = true;
+    // 真空 duck 即時輪詢(~0.4s):讓 audio void 緊跟視覺 void,不被稀疏的敲擊 tick(~18–26s)拖到最壞一個 interval。
+    // applyVoidGate 只在狀態切換時動 gain(ducked 旗標守門),其餘輪詢只是兩個布林比較 → 24/7 成本可忽略。
+    if (!voidPollTimer) voidPollTimer = setInterval(applyVoidGate, 400);
+    applyVoidGate();               // 萬一一啟動就正逢真空,先對齊 duck 狀態
+    // 解鎖即先敲一聲(像原型勾「自動循環」時的行為),再進無限脈動。
+    if (!inVoid()) strike();
+    scheduleNextStrike();
+  }
+
+  // resume 後若已 running 就啟動;用 statechange + then 雙保險偵測 running。
+  function resumeThenStart() {
+    if (!actx) return;
+    actx.onstatechange = () => { if (actx.state === 'running') startCycle(); };
+    actx.resume().then(() => { if (actx.state === 'running') startCycle(); }).catch(() => {});
+  }
+
+  // ---- 對外(兩路徑解鎖)----
+  // unlock:訪客第一次點擊呼叫(檔尾 click handler 內)。
+  function unlock() {
+    if (!BOWL.enabled) return;
+    initAudio();
+    resumeThenStart();
+  }
+  // tryAutostart:載入時試一次。kiosk 帶 --autoplay-policy=no-user-gesture-required
+  // → 直接 running → 自動開始;一般網頁無手勢 → 維持 suspended、等 unlock()。
+  function tryAutostart() {
+    if (!BOWL.enabled) return;
+    initAudio();
+    resumeThenStart();
+  }
+
+  window.BowlAudio = { unlock, tryAutostart };
+})();
+
 document.addEventListener('click', () => {
   if (!document.fullscreenElement) document.documentElement.requestFullscreen().catch(() => {});
+  // 順手解鎖頌缽(若尚未啟動):initAudio + resume + 冪等啟動排程。
+  if (window.BowlAudio) window.BowlAudio.unlock();
 });
+
+// 載入時也試一次:kiosk(no-user-gesture-required)會直接 running → 自動開始;
+// 一般網頁維持 suspended,等首次點擊由上方 handler 解鎖。
+if (window.BowlAudio) window.BowlAudio.tryAutostart();
 </script>
 </body>
 </html>
